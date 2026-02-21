@@ -58,6 +58,10 @@ class Charts(QWidget):
         for chart in self._all_charts():
             chart.load(data)
 
+    def set_timestamp(self, t: float) -> None:
+        for chart in self._all_charts():
+            chart.set_timestamp(t)
+
     def clear(self) -> None:
         for chart in self._all_charts():
             chart.clear()
