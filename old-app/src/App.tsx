@@ -6,24 +6,6 @@ import LineChart from "./components/line-chart";
 
 const loader = new CSVDataLoader();
 
-const COLUMNS: { key: keyof FlightDataRow; label: string }[] = [
-  { key: "timestamp", label: "Time (s)" },
-  { key: "accel_x", label: "Accel X" },
-  { key: "accel_y", label: "Accel Y" },
-  { key: "accel_z", label: "Accel Z" },
-  { key: "gyro_x", label: "Gyro X" },
-  { key: "gyro_y", label: "Gyro Y" },
-  { key: "gyro_z", label: "Gyro Z" },
-  { key: "mag_x", label: "Mag X" },
-  { key: "mag_y", label: "Mag Y" },
-  { key: "mag_z", label: "Mag Z" },
-  { key: "pressure", label: "Pressure" },
-  { key: "temperature", label: "Temp (°C)" },
-];
-
-function fmt(val: number) {
-  return typeof val === "number" ? val.toFixed(4) : val;
-}
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
