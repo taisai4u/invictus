@@ -5,7 +5,7 @@ import { BaseDirectory, readDir, readTextFile } from '@tauri-apps/plugin-fs';
 const DATA_DIR = "dev/invictus/tools/analyzer/assets/sample_data";
 
 // barometer records: barometric pressure, temperature, humidity
-export interface FlightDataRow {
+export type FlightDataRow = {
   timestamp: number;
   accel_x: number;
   accel_y: number;
@@ -18,7 +18,7 @@ export interface FlightDataRow {
   mag_z: number;
   pressure: number;
   temperature: number;
-}
+};
 
 export interface DataLoader {
   listFiles(): Promise<string[]>;

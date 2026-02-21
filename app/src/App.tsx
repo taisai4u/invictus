@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import "./App.css";
 import { CSVDataLoader, FlightDataRow } from "./lib/data-loader";
+import LineChart from "./components/line-chart";
 
 const loader = new CSVDataLoader();
 
@@ -87,26 +88,13 @@ function App() {
 
             {dataQuery.isSuccess && dataQuery.data.length > 0 && (
               <div>
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      {COLUMNS.map((c) => (
-                        <th key={c.key}>{c.label}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {dataQuery.data.map((row, i) => (
-                      <tr key={i}>
-                        <td>{i + 1}</td>
-                        {COLUMNS.map((c) => (
-                          <td key={c.key}>{fmt(row[c.key] as number)}</td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {dataQuery.data.length} rows found.
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="accel_x" width={1000} height={400} />
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="accel_y" width={1000} height={400} />
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="accel_z" width={1000} height={400} />
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="gyro_x" width={1000} height={400} />
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="gyro_y" width={1000} height={400} />
+                <LineChart<FlightDataRow> series={dataQuery.data} timeKey="timestamp" valueKey="gyro_z" width={1000} height={400} />
               </div>
             )}
 
