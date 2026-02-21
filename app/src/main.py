@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QVBoxLayout
 
 from components.charts import Charts
 from components.file_selector import FileSelector
+from components.mission_stats import MissionStats
 from components.playback_controls import PlaybackControls
 from data_loader import DataLoader, CSVDataLoader
 
@@ -22,6 +23,9 @@ class MainWindow(QDialog):
         )
         self.file_selector.file_selected.connect(self._on_file_selected)
         mainLayout.addWidget(self.file_selector)
+
+        self._stats = MissionStats()
+        mainLayout.addWidget(self._stats)
 
         self.charts = Charts()
         mainLayout.addWidget(self.charts)
@@ -42,6 +46,8 @@ class MainWindow(QDialog):
         t_min = float(ts.min())  # type: ignore[arg-type]
         t_max = float(ts.max())  # type: ignore[arg-type]
         self._playback.set_range(t_min, t_max)
+        self.file_selector.set_summary(t_max - t_min, len(self._data))
+        self._stats.load(self._data)
 
 
 if __name__ == "__main__":
