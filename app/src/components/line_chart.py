@@ -2,16 +2,16 @@ from typing import Sequence
 
 import polars as pl
 import pyqtgraph as pg
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QVBoxLayout, QWidget
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QVBoxLayout, QWidget
 
 COLORS = [
     (255, 100, 100),  # red
     (100, 200, 255),  # blue
     (100, 255, 150),  # green
-    (255, 200, 80),   # yellow
+    (255, 200, 80),  # yellow
     (200, 100, 255),  # purple
-    (255, 160, 80),   # orange
+    (255, 160, 80),  # orange
 ]
 
 

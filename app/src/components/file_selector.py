@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from PyQt6.QtCore import QSettings, pyqtSignal
-from PyQt6.QtWidgets import (
+from PyQt5.QtCore import QSettings, pyqtSignal
+from PyQt5.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,

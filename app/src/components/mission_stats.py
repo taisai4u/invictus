@@ -2,7 +2,7 @@ import math
 
 import numpy as np
 import polars as pl
-from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 G = 9.80665
 PA_PER_M = 12.0  # rough sea-level approximation: ~12 Pa per metre

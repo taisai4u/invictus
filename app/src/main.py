@@ -1,16 +1,18 @@
 #!/usr/bin/env python
 
 import polars as pl
-from PyQt6.QtWidgets import QApplication, QDialog, QVBoxLayout
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QMainWindow, QSplitter, QVBoxLayout, QWidget
 
 from components.charts import Charts
 from components.file_selector import FileSelector
 from components.mission_stats import MissionStats
 from components.playback_controls import PlaybackControls
+from components.rocket_view_3d import RocketView3D
 from data_loader import DataLoader, CSVDataLoader
 
 
-class MainWindow(QDialog):
+class MainWindow(QMainWindow):
     def __init__(self, data_loader: DataLoader, parent=None):
         super(MainWindow, self).__init__(parent)
         self._data_loader = data_loader
@@ -27,20 +29,29 @@ class MainWindow(QDialog):
         self._stats = MissionStats()
         mainLayout.addWidget(self._stats)
 
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         self.charts = Charts()
-        mainLayout.addWidget(self.charts)
+        splitter.addWidget(self.charts)
+        self._rocket_view = RocketView3D()
+        splitter.addWidget(self._rocket_view)
+        splitter.setSizes([500, 500])
+        mainLayout.addWidget(splitter, stretch=1)
 
         self._playback = PlaybackControls()
         self._playback.timestamp_changed.connect(self.charts.set_timestamp)
+        self._playback.timestamp_changed.connect(self._rocket_view.set_timestamp)
         mainLayout.addWidget(self._playback)
 
-        self.setLayout(mainLayout)
+        central = QWidget()
+        central.setLayout(mainLayout)
+        self.setCentralWidget(central)
         self.setWindowTitle("Invictus Mission Analyzer")
-        self.resize(1000, 800)
+        self.resize(1400, 900)
 
     def _on_file_selected(self, filepath: str) -> None:
         self._data = self._data_loader.load_data(filepath)
         self.charts.load(self._data)
+        self._rocket_view.load(self._data)
 
         ts = self._data["timestamp"]
         t_min = float(ts.min())  # type: ignore[arg-type]

@@ -1,5 +1,5 @@
 import polars as pl
-from PyQt6.QtWidgets import QScrollArea, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QScrollArea, QVBoxLayout, QWidget
 
 from components.line_chart import LineChart
 
@@ -52,7 +52,13 @@ class Charts(QWidget):
         self.setLayout(layout)
 
     def _all_charts(self) -> list[LineChart]:
-        return [self._accel_chart, self._gyro_chart, self._mag_chart, self._pressure_chart, self._temperature_chart]
+        return [
+            self._accel_chart,
+            self._gyro_chart,
+            self._mag_chart,
+            self._pressure_chart,
+            self._temperature_chart,
+        ]
 
     def load(self, data: pl.DataFrame) -> None:
         for chart in self._all_charts():

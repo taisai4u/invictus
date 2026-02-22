@@ -1,5 +1,5 @@
-from PyQt6.QtCore import QElapsedTimer, QTimer, Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from PyQt5.QtCore import QElapsedTimer, QTimer, Qt, pyqtSignal
+from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -72,7 +72,9 @@ class PlaybackControls(QWidget):
         else:
             if self._scrubber.value() >= _SLIDER_MAX:
                 self._scrubber.setValue(0)
-            self._t_at_play = self._t_min + (self._scrubber.value() / _SLIDER_MAX) * (self._t_max - self._t_min)
+            self._t_at_play = self._t_min + (self._scrubber.value() / _SLIDER_MAX) * (
+                self._t_max - self._t_min
+            )
             self._clock.start()
             self._play_button.setText("Pause")
             self._timer.start()
