@@ -235,7 +235,7 @@ class RocketSim:
             ]
         )
 
-    def step(self, t, dt):
+    def step(self, t, dt, grounded=False):
         # --- Translational dynamics (world frame) ---
         thrust_world = self.quat.apply(self.f_thrust_t(t))
         drag_body = self._compute_aero_force()
@@ -243,6 +243,8 @@ class RocketSim:
         force_noise_world = randn(3) * self.sigma_force
 
         acc = (thrust_world + drag_world + force_noise_world) / self.m + self.g
+        if grounded:
+            acc = np.zeros(3)
         self.pos += self.vel * dt + 0.5 * acc * dt**2
         self.vel += acc * dt
 
@@ -269,7 +271,8 @@ class RocketSim:
         thrust_body = self.f_thrust_t(t) / self.m
         drag_body = self._compute_aero_force() / self.m
         gravity_body = self.quat.inv().apply(self.g)
-        a_true = thrust_body + drag_body - gravity_body
+        gravity_body_experienced = gravity_body if t > START_TIME else np.zeros(3)
+        a_true = thrust_body + drag_body + gravity_body_experienced - gravity_body
 
         w_true = self.omega
 
@@ -304,7 +307,8 @@ I_ROLL = 0.08  # about body z (long axis) [kg·m^2]
 I_BODY = np.diag([I_PITCH, I_YAW, I_ROLL])
 
 # --- Thrust ---
-BURN_TIME = 3.5  # [s]
+START_TIME = 7.5  # [s]
+BURN_TIME = 8.5  # [s]
 THRUST_MAG = 600.0  # [N]
 
 # --- Launch geometry ---
@@ -312,7 +316,7 @@ LAUNCH_ANGLE = 15.0  # degrees off vertical toward +x
 
 # --- Simulation timing ---
 DT = 0.001  # integration timestep [s] (1 kHz)
-T_MAX = 30.0  # max sim time [s]
+T_MAX = 40.0  # max sim time [s]
 
 # --- IMU noise (continuous-time specifications) ---
 SIGMA_ACCEL_NOISE = 0.5  # accelerometer white noise [m/s^2]
@@ -340,7 +344,7 @@ SIGMA_GPS = 2.0  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
-GPS_INTERVAL = 1000
+GPS_INTERVAL = 300
 MAGNETOMETER_INTERVAL = 234
 
 # %%
@@ -357,15 +361,21 @@ def run_simulation():
     omega_0 = np.zeros(3)
     a_b_0 = np.zeros(3)
     w_b_0 = np.zeros(3)
+    print("quat_0: ", quat_0.as_quat(scalar_first=True))
+    print("pos_0: ", pos_0)
 
     # Thrust (body z-axis)
     def f_thrust_t(t):
+        if t < START_TIME:
+            return np.zeros(3)
         if t < BURN_TIME:
             return np.array([0, 0, THRUST_MAG])
         return np.zeros(3)
 
     # Torque from canards
     def f_torque_t(t):
+        if t < START_TIME:
+            return np.zeros(3)
         if t < BURN_TIME:
             roll = 0.06 + 0.02 * np.sin(4.0 * t)
             pitch = 0.3 * np.sin(2.0 * t)
@@ -415,8 +425,10 @@ def run_simulation():
 
     x_nom = np.zeros(16)
     x_nom[6:10] = quat_0.as_quat(scalar_first=True)
+    # DO NOT LEAVE THIS AS 500
+    # the kinematics are non-linear for non-small errors
+    # properly initialize this using the first position and orientation estimates
     P = np.eye(15) * 500
-    P[6:9, 6:9] = np.eye(3) * (10 * np.pi / 180) ** 2
     kf = FlightFilter(
         x_nom=x_nom,
         P=P,
@@ -461,34 +473,83 @@ def run_simulation():
     kf_P_att = np.zeros((n_stored, 3))
     kf_P_pos_full = np.zeros((n_stored, 3, 3))
 
+    first_states_logged = False
+    first_gps_read = False
+
     store_idx = 0
     for i in range(n_steps):
         t = i * DT
-        a_m, w_m = sim.get_imu_reading(t)
-        kf.predict(np.concatenate((a_m, w_m)), DT)
+        if t > START_TIME:
+            if not first_states_logged:
+                np.set_printoptions(precision=3)
+                print("time: ", t)
+                print("nominal state: ", kf.x_nom)
+                print("covariance in position: ", kf.f.P[0:3, 0:3])
+                print("covariance in velocity: ", kf.f.P[3:6, 3:6])
+                print("covariance in orientation: ", kf.f.P[6:9, 6:9])
+                print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
+                print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
+                first_states_logged = True
+            a_m, w_m = sim.get_imu_reading(t)
+            kf.predict(np.concatenate((a_m, w_m)), DT)
 
         if i % GPS_INTERVAL == 0:
             z = sim.get_gps_reading()
-            kf.update(h_gps, z, R_gps, H_x_gps)
+            if not first_gps_read:
+                kf.x_nom[0:3] = z
+                kf.f.P[0:3, 0:3] = R_gps
+                kf.f.P[3:6, 3:6] = np.eye(3) * 0.1**2
+                kf.f.P[9:12, 9:12] = np.eye(3) * 0.1**2
+                kf.f.P[12:15, 12:15] = np.eye(3) * 0.1**2
+                print("first pos: ", kf.x_nom[0:3])
+                print("first covariance: ", kf.f.P[0:3, 0:3])
+                first_gps_read = True
+            else:
+                if t < START_TIME:
+                    print(
+                        "pos, covariance before update: ",
+                        kf.x_nom[0:3],
+                        kf.f.P[0:3, 0:3],
+                    )
+                    kf.update(h_gps, z, R_gps, H_x_gps)
+                    print(
+                        "pos, covariance after update: ",
+                        kf.x_nom[0:3],
+                        kf.f.P[0:3, 0:3],
+                    )
+                else:
+                    kf.update(h_gps, z, R_gps, H_x_gps)
 
-        # if i % MAGNETOMETER_INTERVAL == 0:
-        #     z = sim.get_magnetometer_reading()
-        #     z = z / np.linalg.norm(z)
-        #     q0, q1, q2, q3 = kf.x_nom[6:10]
-        #     p = np.array([q1, q2, q3])
+        if i % MAGNETOMETER_INTERVAL == 0:
+            if t < START_TIME:
+                a_m, w_m = sim.get_imu_reading(t)
+                m_m = sim.get_magnetometer_reading()
+                q, R_cov = get_orientation_and_covariance(
+                    a_m,
+                    m_m,
+                    np.ones(3) * SIGMA_ACCEL_NOISE,
+                    np.ones(3) * SIGMA_MAGNETOMETER,
+                )
+                kf.x_nom[6:10] = q
+                kf.f.P[6:9, 6:9] = R_cov
+            else:
+                z = sim.get_magnetometer_reading()
+                z = z / np.linalg.norm(z)
+                q0, q1, q2, q3 = kf.x_nom[6:10]
+                p = np.array([q1, q2, q3])
 
-        #     H_x_magnetometer = np.zeros((3, 16))
-        #     H_x_magnetometer[0:3, 6:7] = 2 * (
-        #         q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-        #     )
-        #     H_x_magnetometer[0:3, 7:10] = 2 * (
-        #         np.dot(p, NORTH) * np.eye(3)
-        #         + np.outer(p, NORTH)
-        #         - np.outer(NORTH, p)
-        #         + q0 * skew_symmetric(NORTH)
-        #     )
+                H_x_magnetometer = np.zeros((3, 16))
+                H_x_magnetometer[0:3, 6:7] = 2 * (
+                    q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
+                )
+                H_x_magnetometer[0:3, 7:10] = 2 * (
+                    np.dot(p, NORTH) * np.eye(3)
+                    + np.outer(p, NORTH)
+                    - np.outer(NORTH, p)
+                    + q0 * skew_symmetric(NORTH)
+                )
 
-        #     kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+                kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
 
         if i % downsample == 0:
             times[store_idx] = t
@@ -511,7 +572,7 @@ def run_simulation():
             kf_P_pos_full[store_idx] = kf.f.P[0:3, 0:3]
             store_idx += 1
 
-        if sim.pos[2] < 0 and t > 0.1:
+        if sim.pos[2] < 0 and t > BURN_TIME:
             times = times[:store_idx]
             positions = positions[:store_idx]
             velocities = velocities[:store_idx]
@@ -528,7 +589,7 @@ def run_simulation():
             kf_P_pos_full = kf_P_pos_full[:store_idx]
             break
 
-        sim.step(t, DT)
+        sim.step(t, DT, grounded=t < START_TIME)
 
     return {
         "times": times,
@@ -547,6 +608,100 @@ def run_simulation():
         "kf_P_att": kf_P_att,
         "kf_P_pos_full": kf_P_pos_full,
     }
+
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+
+def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m):
+    a_m = np.asarray(a_m, dtype=float)
+    m_m = np.asarray(m_m, dtype=float)
+
+    # Enforce sigmas as 3-element arrays
+    sigma_a = np.asarray(sigma_a, dtype=float).flatten()
+    sigma_m = np.asarray(sigma_m, dtype=float).flatten()
+
+    # Create the measured orthogonal basis (Body Frame)
+    v1_b = a_m / np.linalg.norm(a_m)
+
+    v2_b = np.cross(v1_b, m_m)
+    v2_b = v2_b / np.linalg.norm(v2_b)
+
+    v3_b = np.cross(v1_b, v2_b)
+
+    # Body triad matrix: [v1_b | v2_b | v3_b]
+    M_B = np.column_stack((v1_b, v2_b, v3_b))
+
+    # reference vectors
+    w_a = -G
+    w_m = NORTH
+
+    # reference orthogonal basis
+    v1_w = w_a
+    v2_w = np.cross(v1_w, w_m)
+    v2_w = v2_w / np.linalg.norm(v2_w)
+    v3_w = np.cross(v1_w, v2_w)
+
+    # World triad matrix: [v1_w | v2_w | v3_w]
+    M_W = np.column_stack((v1_w, v2_w, v3_w))
+
+    # Compute Rotation Matrix: R_mat maps body vectors to world vectors
+    # M_W = R_mat * M_B  =>  R_mat = M_W * M_B^T
+    R_mat = M_W @ M_B.T
+
+    # Convert to scalar-first quaternion
+    q = Rotation.from_matrix(R_mat).as_quat(scalar_first=True)
+
+    # ==========================================
+    # Numerical Jacobian for Covariance (R_cov)
+    # ==========================================
+    sensors = np.concatenate((a_m, m_m))
+
+    def compute_euler(s):
+        ax, ay, az = s[0], s[1], s[2]
+        mx, my, mz = s[3], s[4], s[5]
+
+        # Euler proxy to map local sensor sensitivities to 3-DOF rotational errors
+        phi = np.arctan2(ay, az)
+        theta = np.arctan2(-ax, np.sqrt(ay**2 + az**2))
+
+        mx_prime = (
+            mx * np.cos(theta)
+            + my * np.sin(phi) * np.sin(theta)
+            + mz * np.cos(phi) * np.sin(theta)
+        )
+        my_prime = my * np.cos(phi) - mz * np.sin(phi)
+        psi = np.arctan2(-my_prime, mx_prime)
+
+        return np.array([phi, theta, psi])
+
+    J = np.zeros((3, 6))
+    epsilon = 1e-5
+
+    for i in range(6):
+        s_plus = sensors.copy()
+        s_minus = sensors.copy()
+
+        s_plus[i] += epsilon
+        s_minus[i] -= epsilon
+
+        euler_plus = compute_euler(s_plus)
+        euler_minus = compute_euler(s_minus)
+
+        diff = euler_plus - euler_minus
+        # Handle phase wrapping across boundaries
+        diff = (diff + np.pi) % (2 * np.pi) - np.pi
+
+        J[:, i] = diff / (2.0 * epsilon)
+
+    # Build the 6x6 diagonal sensor noise covariance matrix
+    Sigma_x = np.diag(np.concatenate((sigma_a**2, sigma_m**2)))
+
+    # Calculate the 3x3 covariance matrix
+    R_cov = J @ Sigma_x @ J.T
+
+    return q, R_cov
 
 
 # %%
