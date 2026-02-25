@@ -1,4 +1,5 @@
 # %%
+from math import atan2
 from typing import cast
 from filterpy.kalman import ExtendedKalmanFilter
 import numpy as np
@@ -433,8 +434,23 @@ def run_simulation():
     H_x_gps = np.zeros((3, 19))
     H_x_gps[0:3, 0:3] = np.eye(3)
 
+    def get_world_orientation(x_nom):
+        g_frame = x_nom[16:19]
+        axis = np.cross(g_frame, G)
+        axis_norm = np.linalg.norm(axis)
+        angle = np.arctan2(axis_norm, np.dot(g_frame, G))
+        if axis_norm < 1e-6:
+            axis_angle = np.zeros(3)
+        else:
+            axis_angle = axis / axis_norm * angle
+        world_orientation = Rotation.from_rotvec(axis_angle) * Rotation.from_quat(
+            x_nom[6:10], scalar_first=True
+        )
+        return world_orientation
+
     def h_magnetometer(x_nom):
-        return Rotation.from_quat(x_nom[6:10], scalar_first=True).inv().apply(NORTH)
+        world_orientation = get_world_orientation(x_nom)
+        return world_orientation.inv().apply(NORTH)
 
     R_magnetometer = np.eye(3) * SIGMA_MAGNETOMETER**2
 
@@ -469,11 +485,22 @@ def run_simulation():
             z = sim.get_gps_reading()
             kf.update(h_gps, z, R_gps, H_x_gps)
 
-        # if i % MAGNETOMETER_INTERVAL == 0:
-        #     z = sim.get_magnetometer_reading()
-        #     q0 = kf.x_nom[6]
-
-        #     kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+        if i % MAGNETOMETER_INTERVAL == 0:
+            z = sim.get_magnetometer_reading()
+            # q0, q1, q2, q3 = kf.x_nom[6:10]
+            q0, q1, q2, q3 = get_world_orientation(kf.x_nom).as_quat(scalar_first=True)
+            p = np.array([q1, q2, q3])
+            H_x_magnetometer = np.zeros((3, 19))
+            H_x_magnetometer[0:3, 6:7] = 2 * (
+                q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
+            )
+            H_x_magnetometer[0:3, 7:10] = 2 * (
+                np.dot(p, NORTH) * np.eye(3)
+                + p.reshape(3, 1) @ NORTH.reshape(1, 3)
+                - NORTH.reshape(3, 1) @ p.reshape(1, 3)
+                + q0 * skew_symmetric(NORTH)
+            )
+            kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
 
         if i % downsample == 0:
             times[store_idx] = t
