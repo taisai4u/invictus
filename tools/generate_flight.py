@@ -262,6 +262,16 @@ def simulate(
             "mag_z": mag_meas[2],
             "pressure": pressure_meas,
             "temperature": temp_meas,
+            "pos_x": pos[0],
+            "pos_y": pos[1],
+            "pos_z": pos[2],
+            "vel_x": vel[0],
+            "vel_y": vel[1],
+            "vel_z": vel[2],
+            "quat_w": q[0],
+            "quat_x": q[1],
+            "quat_y": q[2],
+            "quat_z": q[3],
         })
 
         # --- Integrate dynamics ---
@@ -290,6 +300,9 @@ COLUMNS = [
     "gyro_x", "gyro_y", "gyro_z",
     "mag_x", "mag_y", "mag_z",
     "pressure", "temperature",
+    "pos_x", "pos_y", "pos_z",
+    "vel_x", "vel_y", "vel_z",
+    "quat_w", "quat_x", "quat_y", "quat_z",
 ]
 
 

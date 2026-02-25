@@ -19,6 +19,16 @@ class FlightDataRow:
     mag_z: float
     pressure: float
     temperature: float
+    pos_x: float
+    pos_y: float
+    pos_z: float
+    vel_x: float
+    vel_y: float
+    vel_z: float
+    quat_w: float
+    quat_x: float
+    quat_y: float
+    quat_z: float
 
 
 SCHEMA = {
@@ -34,6 +44,16 @@ SCHEMA = {
     "mag_z": pl.Float64,
     "pressure": pl.Float64,
     "temperature": pl.Float64,
+    "pos_x": pl.Float64,
+    "pos_y": pl.Float64,
+    "pos_z": pl.Float64,
+    "vel_x": pl.Float64,
+    "vel_y": pl.Float64,
+    "vel_z": pl.Float64,
+    "quat_w": pl.Float64,
+    "quat_x": pl.Float64,
+    "quat_y": pl.Float64,
+    "quat_z": pl.Float64,
 }
 
 

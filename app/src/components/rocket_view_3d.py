@@ -7,7 +7,7 @@ import quaternion as quat_mod
 from pyvistaqt import QtInteractor
 from PyQt5.QtWidgets import QFrame, QPushButton, QVBoxLayout
 
-from simulation.euler import EulerStateEstimator
+from simulation.ground_truth import GroundTruthEstimator
 from simulation.interface import (
     POS_X,
     POS_Z,
@@ -15,7 +15,6 @@ from simulation.interface import (
     Q_Z,
     STATE_DIM,
     TIMESTAMP,
-    make_initial_state,
 )
 
 _AXIS_LEN = 1.0  # base arrow length in world units (rescaled each frame)
@@ -102,16 +101,15 @@ class RocketView3D(QFrame):
             self._trail_actor = None
 
         sensor_data = data.to_numpy()
-        estimator = EulerStateEstimator()
-        state = make_initial_state()
+        estimator = GroundTruthEstimator()
 
         n = len(sensor_data)
         states = np.empty((n, STATE_DIM), dtype=np.float64)
-        states[0] = state.copy()
+        states[0] = estimator.state.copy()
         for i in range(1, n):
             dt = sensor_data[i, TIMESTAMP] - sensor_data[i - 1, TIMESTAMP]
-            state = estimator.step(dt, state, sensor_data[i])
-            states[i] = state.copy()
+            estimator.step(dt, sensor_data[i])
+            states[i] = estimator.state.copy()
 
         self._timestamps = sensor_data[:, TIMESTAMP]
         self._states = states
