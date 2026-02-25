@@ -98,9 +98,7 @@ class FlightFilter:
         K = self.f.P @ H.T @ np.linalg.inv(S)
         k = len(y)
         log_likelihood = -0.5 * (
-            k * np.log(2 * np.pi)
-            + np.log(np.linalg.det(S))
-            + y @ np.linalg.solve(S, y)
+            k * np.log(2 * np.pi) + np.log(np.linalg.det(S)) + y @ np.linalg.solve(S, y)
         )
 
         # update error state: x, P
@@ -348,11 +346,12 @@ SIGMA_FORCE_NOISE = 0.5  # translational disturbance [N]
 SIGMA_TORQUE_NOISE = 0.01  # rotational disturbance [N·m]
 
 # --- Sensor noise for observation models ---
-SIGMA_GPS = 20.0  # GPS position noise [m]
+SIGMA_GPS = np.array([3, 3, 100])  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
 GPS_INTERVAL = 300
+ALTIMETER_INTERVAL = 100
 MAGNETOMETER_INTERVAL = 234
 
 # %%
@@ -450,9 +449,16 @@ def run_simulation():
     def h_gps(x_nom):
         return x_nom[0:3]
 
-    R_gps = np.eye(3) * SIGMA_GPS**2
+    R_gps = np.diag(SIGMA_GPS) ** 2
     H_x_gps = np.zeros((3, 16))
     H_x_gps[0:3, 0:3] = np.eye(3)
+
+    def h_altimeter(x_nom):
+        return np.array([x_nom[2]])
+
+    R_altimeter = np.array([[SIGMA_ALTIMETER**2]])
+    H_x_altimeter = np.zeros((1, 16))
+    H_x_altimeter[0, 2] = 1.0
 
     def h_magnetometer(x_nom):
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
@@ -487,6 +493,8 @@ def run_simulation():
 
     gps_log_likelihoods = []
     gps_ll_times = []
+    alt_log_likelihoods = []
+    alt_ll_times = []
     mag_log_likelihoods = []
     mag_ll_times = []
 
@@ -540,6 +548,12 @@ def run_simulation():
                     ll = kf.update(h_gps, z, R_gps, H_x_gps)
                     gps_log_likelihoods.append(ll)
                     gps_ll_times.append(t)
+
+        if i % ALTIMETER_INTERVAL == 0 and t > START_TIME:
+            z = np.array([sim.get_altimeter_reading()])
+            ll = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
+            alt_log_likelihoods.append(ll)
+            alt_ll_times.append(t)
 
         if i % MAGNETOMETER_INTERVAL == 0:
             if t < START_TIME:
@@ -640,6 +654,8 @@ def run_simulation():
         "kf_P_pos_full": kf_P_pos_full,
         "gps_log_likelihoods": np.array(gps_log_likelihoods),
         "gps_ll_times": np.array(gps_ll_times),
+        "alt_log_likelihoods": np.array(alt_log_likelihoods),
+        "alt_ll_times": np.array(alt_ll_times),
         "mag_log_likelihoods": np.array(mag_log_likelihoods),
         "mag_ll_times": np.array(mag_ll_times),
         "kf_P_full": kf_P_full,
@@ -884,6 +900,13 @@ def plot_results(data):
         )
     )
 
+    gt_mid = (pos.max(axis=0) + pos.min(axis=0)) / 2
+    gt_range = pos.max(axis=0) - pos.min(axis=0)
+    half_extent = gt_range / 2 * 1.2
+    axis_ranges = [
+        [gt_mid[i] - half_extent[i], gt_mid[i] + half_extent[i]] for i in range(3)
+    ]
+
     fig_3d.update_layout(
         title=dict(
             text="Rocket Trajectory — Ground Truth vs Filter (2σ ellipses)",
@@ -896,13 +919,19 @@ def plot_results(data):
             aspectmode="data",
             bgcolor="rgb(15, 15, 25)",
             xaxis=dict(
-                gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.2)"
+                gridcolor="rgba(255,255,255,0.1)",
+                zerolinecolor="rgba(255,255,255,0.2)",
+                range=axis_ranges[0],
             ),
             yaxis=dict(
-                gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.2)"
+                gridcolor="rgba(255,255,255,0.1)",
+                zerolinecolor="rgba(255,255,255,0.2)",
+                range=axis_ranges[1],
             ),
             zaxis=dict(
-                gridcolor="rgba(255,255,255,0.1)", zerolinecolor="rgba(255,255,255,0.2)"
+                gridcolor="rgba(255,255,255,0.1)",
+                zerolinecolor="rgba(255,255,255,0.2)",
+                range=axis_ranges[2],
             ),
         ),
         paper_bgcolor="rgb(20, 20, 35)",
@@ -1292,6 +1321,16 @@ def plot_results(data):
     )
     fig_ll.add_trace(
         go.Scatter(
+            x=data["alt_ll_times"],
+            y=data["alt_log_likelihoods"],
+            mode="lines+markers",
+            line=dict(color="#51cf66", width=1.5),
+            marker=dict(size=4, color="#51cf66"),
+            name="Altimeter",
+        )
+    )
+    fig_ll.add_trace(
+        go.Scatter(
             x=data["mag_ll_times"],
             y=data["mag_log_likelihoods"],
             mode="lines+markers",
@@ -1367,7 +1406,9 @@ def plot_results(data):
         line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
     )
     fig_nees.update_layout(
-        title=dict(text="NEES (Normalized Estimation Error Squared)", font=dict(size=18)),
+        title=dict(
+            text="NEES (Normalized Estimation Error Squared)", font=dict(size=18)
+        ),
         xaxis_title="Time (s)",
         yaxis_title="NEES",
         paper_bgcolor="rgb(20, 20, 35)",
