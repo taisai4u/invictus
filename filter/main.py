@@ -96,6 +96,12 @@ class FlightFilter:
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
         K = self.f.P @ H.T @ np.linalg.inv(S)
+        k = len(y)
+        log_likelihood = -0.5 * (
+            k * np.log(2 * np.pi)
+            + np.log(np.linalg.det(S))
+            + y @ np.linalg.solve(S, y)
+        )
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
@@ -115,6 +121,8 @@ class FlightFilter:
         G[6:9, 6:9] -= skew_symmetric(0.5 * self.f.x[6:9])
         self.f.P = G @ self.f.P @ G.T
         self.f.x = np.zeros(15)
+
+        return log_likelihood
 
 
 # %%
@@ -340,7 +348,7 @@ SIGMA_FORCE_NOISE = 0.5  # translational disturbance [N]
 SIGMA_TORQUE_NOISE = 0.01  # rotational disturbance [N·m]
 
 # --- Sensor noise for observation models ---
-SIGMA_GPS = 2.0  # GPS position noise [m]
+SIGMA_GPS = 20.0  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
@@ -472,6 +480,15 @@ def run_simulation():
     kf_P_vel = np.zeros((n_stored, 3))
     kf_P_att = np.zeros((n_stored, 3))
     kf_P_pos_full = np.zeros((n_stored, 3, 3))
+    kf_P_full = np.zeros((n_stored, 15, 15))
+    kf_x_nom_full = np.zeros((n_stored, 16))
+    true_a_b = np.zeros((n_stored, 3))
+    true_w_b = np.zeros((n_stored, 3))
+
+    gps_log_likelihoods = []
+    gps_ll_times = []
+    mag_log_likelihoods = []
+    mag_ll_times = []
 
     first_states_logged = False
     first_gps_read = False
@@ -511,14 +528,18 @@ def run_simulation():
                         kf.x_nom[0:3],
                         kf.f.P[0:3, 0:3],
                     )
-                    kf.update(h_gps, z, R_gps, H_x_gps)
+                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
+                    gps_log_likelihoods.append(ll)
+                    gps_ll_times.append(t)
                     print(
                         "pos, covariance after update: ",
                         kf.x_nom[0:3],
                         kf.f.P[0:3, 0:3],
                     )
                 else:
-                    kf.update(h_gps, z, R_gps, H_x_gps)
+                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
+                    gps_log_likelihoods.append(ll)
+                    gps_ll_times.append(t)
 
         if i % MAGNETOMETER_INTERVAL == 0:
             if t < START_TIME:
@@ -549,7 +570,9 @@ def run_simulation():
                     + q0 * skew_symmetric(NORTH)
                 )
 
-                kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+                ll = kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+                mag_log_likelihoods.append(ll)
+                mag_ll_times.append(t)
 
         if i % downsample == 0:
             times[store_idx] = t
@@ -570,6 +593,10 @@ def run_simulation():
             kf_P_vel[store_idx] = P_diag[3:6]
             kf_P_att[store_idx] = P_diag[6:9]
             kf_P_pos_full[store_idx] = kf.f.P[0:3, 0:3]
+            kf_P_full[store_idx] = kf.f.P.copy()
+            kf_x_nom_full[store_idx] = kf.x_nom.copy()
+            true_a_b[store_idx] = sim.a_b.copy()
+            true_w_b[store_idx] = sim.w_b.copy()
             store_idx += 1
 
         if sim.pos[2] < 0 and t > BURN_TIME:
@@ -587,6 +614,10 @@ def run_simulation():
             kf_P_vel = kf_P_vel[:store_idx]
             kf_P_att = kf_P_att[:store_idx]
             kf_P_pos_full = kf_P_pos_full[:store_idx]
+            kf_P_full = kf_P_full[:store_idx]
+            kf_x_nom_full = kf_x_nom_full[:store_idx]
+            true_a_b = true_a_b[:store_idx]
+            true_w_b = true_w_b[:store_idx]
             break
 
         sim.step(t, DT, grounded=t < START_TIME)
@@ -607,6 +638,14 @@ def run_simulation():
         "kf_P_vel": kf_P_vel,
         "kf_P_att": kf_P_att,
         "kf_P_pos_full": kf_P_pos_full,
+        "gps_log_likelihoods": np.array(gps_log_likelihoods),
+        "gps_ll_times": np.array(gps_ll_times),
+        "mag_log_likelihoods": np.array(mag_log_likelihoods),
+        "mag_ll_times": np.array(mag_ll_times),
+        "kf_P_full": kf_P_full,
+        "kf_x_nom_full": kf_x_nom_full,
+        "true_a_b": true_a_b,
+        "true_w_b": true_w_b,
     }
 
 
@@ -1239,7 +1278,114 @@ def plot_results(data):
                 col=j,
             )
 
-    return fig_3d, fig_ts
+    # ======== FIGURE 3: Log-Likelihood ========
+    fig_ll = go.Figure()
+    fig_ll.add_trace(
+        go.Scatter(
+            x=data["gps_ll_times"],
+            y=data["gps_log_likelihoods"],
+            mode="lines+markers",
+            line=dict(color="#339af0", width=1.5),
+            marker=dict(size=4, color="#339af0"),
+            name="GPS",
+        )
+    )
+    fig_ll.add_trace(
+        go.Scatter(
+            x=data["mag_ll_times"],
+            y=data["mag_log_likelihoods"],
+            mode="lines+markers",
+            line=dict(color="#ffd43b", width=1.5),
+            marker=dict(size=4, color="#ffd43b"),
+            name="Magnetometer",
+        )
+    )
+    fig_ll.add_vline(
+        x=burn_time,
+        line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
+    )
+    fig_ll.update_layout(
+        title=dict(text="Measurement Log-Likelihood", font=dict(size=18)),
+        xaxis_title="Time (s)",
+        yaxis_title="Log-Likelihood",
+        paper_bgcolor="rgb(20, 20, 35)",
+        plot_bgcolor="rgb(25, 25, 40)",
+        font=dict(color="white", size=10),
+        width=900,
+        height=400,
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
+        yaxis=dict(
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
+    )
+
+    # ======== FIGURE 4: NEES ========
+    n = len(times)
+    nees = np.zeros(n)
+    pos_true = data["positions"]
+    vel_true = data["velocities"]
+    quats_true = data["quats"]
+    a_b_true = data["true_a_b"]
+    w_b_true = data["true_w_b"]
+    x_nom_full = data["kf_x_nom_full"]
+    P_full = data["kf_P_full"]
+
+    for i in range(n):
+        dx = np.zeros(15)
+        dx[0:3] = pos_true[i] - x_nom_full[i, 0:3]
+        dx[3:6] = vel_true[i] - x_nom_full[i, 3:6]
+        q_true = Rotation.from_quat(quats_true[i], scalar_first=True)
+        q_est = Rotation.from_quat(x_nom_full[i, 6:10], scalar_first=True)
+        dq = q_est.inv() * q_true
+        dx[6:9] = dq.as_rotvec()
+        dx[9:12] = a_b_true[i] - x_nom_full[i, 10:13]
+        dx[12:15] = w_b_true[i] - x_nom_full[i, 13:16]
+        nees[i] = dx @ np.linalg.solve(P_full[i], dx)
+
+    fig_nees = go.Figure()
+    fig_nees.add_trace(
+        go.Scatter(
+            x=times,
+            y=nees,
+            mode="lines",
+            line=dict(color="#51cf66", width=1.5),
+            name="NEES",
+        )
+    )
+    fig_nees.add_hline(
+        y=15,
+        line=dict(color="rgba(255,255,255,0.4)", width=1, dash="dash"),
+        annotation_text="E[NEES] = dim(x) = 15",
+        annotation_font_color="white",
+    )
+    fig_nees.add_vline(
+        x=burn_time,
+        line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
+    )
+    fig_nees.update_layout(
+        title=dict(text="NEES (Normalized Estimation Error Squared)", font=dict(size=18)),
+        xaxis_title="Time (s)",
+        yaxis_title="NEES",
+        paper_bgcolor="rgb(20, 20, 35)",
+        plot_bgcolor="rgb(25, 25, 40)",
+        font=dict(color="white", size=10),
+        width=900,
+        height=400,
+        xaxis=dict(
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
+        yaxis=dict(
+            gridcolor="rgba(255,255,255,0.07)",
+            zerolinecolor="rgba(255,255,255,0.15)",
+        ),
+    )
+
+    return fig_3d, fig_ts, fig_ll, fig_nees
 
 
 print("Running rocket simulation...")
@@ -1255,8 +1401,10 @@ print(f"Flight time: {t[-1]:.1f} s")
 print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
 print(f"Final quaternion: {data['quats'][-1]}")
 
-fig_3d, fig_ts = plot_results(data)
+fig_3d, fig_ts, fig_ll, fig_nees = plot_results(data)
 fig_3d.show()
 fig_ts.show()
+fig_ll.show()
+fig_nees.show()
 
 # %%
