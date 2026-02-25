@@ -13,16 +13,17 @@ def skew_symmetric(v):
 
 class FlightFilter:
     def __init__(
-        self, x_nom, P, sigma_a_noise, sigma_w_noise, sigma_a_walk, sigma_w_walk
+        self, x_nom, P, sigma_a_noise, sigma_w_noise, sigma_a_walk, sigma_w_walk, g
     ):
-        self.f = ExtendedKalmanFilter(dim_x=3 * 6, dim_z=3, dim_u=3 * 2)
-        self.f.x = np.zeros(3 * 6)
+        self.f = ExtendedKalmanFilter(dim_x=3 * 5, dim_z=3, dim_u=3 * 2)
+        self.f.x = np.zeros(3 * 5)
         self.f.P = P
         self.sigma_a_noise = sigma_a_noise
         self.sigma_w_noise = sigma_w_noise
         self.sigma_a_walk = sigma_a_walk
         self.sigma_w_walk = sigma_w_walk
         self.x_nom = x_nom
+        self.g = g
 
     def get_rotation_matrix(self):
         q = self.x_nom[6:10]
@@ -34,12 +35,11 @@ class FlightFilter:
         a_b = self.x_nom[10:13]
         w_b = self.x_nom[13:16]
         R = self.get_rotation_matrix()
-        F_x = np.eye(3 * 6)
+        F_x = np.eye(3 * 5)
         F_x[0:3, 3:6] = np.eye(3) * dt
 
         F_x[3:6, 6:9] = -R @ skew_symmetric(a_m - a_b) * dt
         F_x[3:6, 9:12] = -R * dt
-        F_x[3:6, 15:18] = np.eye(3) * dt
 
         F_x[6:9, 6:9] = Rotation.from_rotvec((w_m - w_b) * dt).as_matrix().T
         F_x[6:9, 12:15] = -np.eye(3) * dt
@@ -54,7 +54,6 @@ class FlightFilter:
             (
                 np.zeros((3, 3 * 4)),
                 np.eye(3 * 4),
-                np.zeros((3, 3 * 4)),
             )
         )
         Q_i = cast(np.ndarray, block_diag(V_i, Theta_i, A_i, Omega_i))
@@ -72,7 +71,7 @@ class FlightFilter:
         w_m = u[3:6]
         a_b = self.x_nom[10:13]
         w_b = self.x_nom[13:16]
-        g = self.x_nom[16:19]
+        g = self.g
         v = self.x_nom[3:6]
         self.x_nom[0:3] += v * dt + 0.5 * (R @ (a_m - a_b) + g) * dt**2
         self.x_nom[3:6] += (R @ (a_m - a_b) + g) * dt
@@ -86,10 +85,10 @@ class FlightFilter:
         Q_dtheta = 0.5 * np.array(
             [[-qx, -qy, -qz], [qw, -qz, qy], [qz, qw, -qx], [-qy, qx, qw]]
         )
-        X_dx = np.zeros((19, 18))
+        X_dx = np.zeros((16, 15))
         X_dx[0:6, 0:6] = np.eye(6)
         X_dx[6:10, 6:9] = Q_dtheta
-        X_dx[10:19, 9:18] = np.eye(9)
+        X_dx[10:16, 9:15] = np.eye(6)
         return X_dx
 
     def update(self, h, z, R, H_x):
@@ -100,7 +99,7 @@ class FlightFilter:
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
-        A = np.eye(18) - K @ H
+        A = np.eye(15) - K @ H
         self.f.P = A @ self.f.P @ A.T + K @ R @ K.T
 
         # inject error state into nominal state
@@ -109,13 +108,13 @@ class FlightFilter:
             Rotation.from_quat(self.x_nom[6:10], scalar_first=True)
             * Rotation.from_rotvec(self.f.x[6:9])
         ).as_quat(scalar_first=True)
-        self.x_nom[10:19] += self.f.x[9:18]
+        self.x_nom[10:16] += self.f.x[9:15]
 
         # reset error state to 0, adjust x, P to account for injection
-        G = np.eye(18)
+        G = np.eye(15)
         G[6:9, 6:9] -= skew_symmetric(0.5 * self.f.x[6:9])
         self.f.P = G @ self.f.P @ G.T
-        self.f.x = np.zeros(18)
+        self.f.x = np.zeros(15)
 
 
 # %%
@@ -342,7 +341,7 @@ SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
 GPS_INTERVAL = 1000
-MAGNETOMETER_INTERVAL = 100
+MAGNETOMETER_INTERVAL = 234
 
 # %%
 # ============================================================
@@ -414,10 +413,10 @@ def run_simulation():
         sigma_magnetometer=SIGMA_MAGNETOMETER,
     )
 
-    x_nom = np.zeros(19)
-    x_nom[6:10] = np.array([1.0, 0.0, 0.0, 0.0])
-    P = np.eye(18) * 500
-    P[6:9, 6:9] = np.zeros((3, 3))
+    x_nom = np.zeros(16)
+    x_nom[6:10] = quat_0.as_quat(scalar_first=True)
+    P = np.eye(15) * 500
+    P[6:9, 6:9] = np.eye(3) * (10 * np.pi / 180) ** 2
     kf = FlightFilter(
         x_nom=x_nom,
         P=P,
@@ -425,31 +424,18 @@ def run_simulation():
         sigma_w_noise=SIGMA_GYRO_NOISE,
         sigma_a_walk=SIGMA_ACCEL_WALK,
         sigma_w_walk=SIGMA_GYRO_WALK,
+        g=G,
     )
 
     def h_gps(x_nom):
         return x_nom[0:3]
 
     R_gps = np.eye(3) * SIGMA_GPS**2
-    H_x_gps = np.zeros((3, 19))
+    H_x_gps = np.zeros((3, 16))
     H_x_gps[0:3, 0:3] = np.eye(3)
 
-    def get_world_orientation(x_nom):
-        g_frame = x_nom[16:19]
-        axis = np.cross(g_frame, G)
-        axis_norm = np.linalg.norm(axis)
-        angle = np.arctan2(axis_norm, np.dot(g_frame, G))
-        if axis_norm < 1e-6:
-            axis_angle = np.zeros(3)
-        else:
-            axis_angle = axis / axis_norm * angle
-        world_orientation = Rotation.from_rotvec(axis_angle) * Rotation.from_quat(
-            x_nom[6:10], scalar_first=True
-        )
-        return world_orientation
-
     def h_magnetometer(x_nom):
-        world_orientation = get_world_orientation(x_nom)
+        world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
         return world_orientation.inv().apply(NORTH)
 
     R_magnetometer = np.eye(3) * SIGMA_MAGNETOMETER**2
@@ -485,22 +471,24 @@ def run_simulation():
             z = sim.get_gps_reading()
             kf.update(h_gps, z, R_gps, H_x_gps)
 
-        if i % MAGNETOMETER_INTERVAL == 0:
-            z = sim.get_magnetometer_reading()
-            # q0, q1, q2, q3 = kf.x_nom[6:10]
-            q0, q1, q2, q3 = get_world_orientation(kf.x_nom).as_quat(scalar_first=True)
-            p = np.array([q1, q2, q3])
-            H_x_magnetometer = np.zeros((3, 19))
-            H_x_magnetometer[0:3, 6:7] = 2 * (
-                q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-            )
-            H_x_magnetometer[0:3, 7:10] = 2 * (
-                np.dot(p, NORTH) * np.eye(3)
-                + p.reshape(3, 1) @ NORTH.reshape(1, 3)
-                - NORTH.reshape(3, 1) @ p.reshape(1, 3)
-                + q0 * skew_symmetric(NORTH)
-            )
-            kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+        # if i % MAGNETOMETER_INTERVAL == 0:
+        #     z = sim.get_magnetometer_reading()
+        #     z = z / np.linalg.norm(z)
+        #     q0, q1, q2, q3 = kf.x_nom[6:10]
+        #     p = np.array([q1, q2, q3])
+
+        #     H_x_magnetometer = np.zeros((3, 16))
+        #     H_x_magnetometer[0:3, 6:7] = 2 * (
+        #         q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
+        #     )
+        #     H_x_magnetometer[0:3, 7:10] = 2 * (
+        #         np.dot(p, NORTH) * np.eye(3)
+        #         + np.outer(p, NORTH)
+        #         - np.outer(NORTH, p)
+        #         + q0 * skew_symmetric(NORTH)
+        #     )
+
+        #     kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
 
         if i % downsample == 0:
             times[store_idx] = t
