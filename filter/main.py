@@ -431,22 +431,6 @@ def run_simulation():
         sigma_magnetometer=SIGMA_MAGNETOMETER,
     )
 
-    x_nom = np.zeros(16)
-    x_nom[6:10] = quat_0.as_quat(scalar_first=True)
-    # DO NOT LEAVE THIS AS 500
-    # the kinematics are non-linear for non-small errors
-    # properly initialize this using the first position and orientation estimates
-    P = np.eye(15) * 500
-    kf = FlightFilter(
-        x_nom=x_nom,
-        P=P,
-        sigma_a_noise=SIGMA_ACCEL_NOISE,
-        sigma_w_noise=SIGMA_GYRO_NOISE,
-        sigma_a_walk=SIGMA_ACCEL_WALK,
-        sigma_w_walk=SIGMA_GYRO_WALK,
-        g=G,
-    )
-
     def h_gps(x_nom):
         return x_nom[0:3]
 
@@ -500,94 +484,83 @@ def run_simulation():
     mag_ll_times = []
 
     first_states_logged = False
-    first_gps_read = False
+
+    # initialize the filter
+    x_nom = np.zeros(16)
+    P = np.eye(15) * 500
+    P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_WALK**2 * 10
+    P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_WALK**2 * 10
+    gps = sim.get_gps_reading()
+    x_nom[0:3] = gps
+    P[0:3, 0:3] = R_gps
+    a_m, w_m = sim.get_imu_reading(0)
+    m_m = sim.get_magnetometer_reading()
+    q, R_cov = get_orientation_and_covariance(
+        a_m,
+        m_m,
+        np.ones(3) * SIGMA_ACCEL_NOISE,
+        np.ones(3) * SIGMA_MAGNETOMETER,
+    )
+    x_nom[6:10] = q
+    P[6:9, 6:9] = R_cov
+    kf = FlightFilter(
+        x_nom=x_nom,
+        P=P,
+        sigma_a_noise=SIGMA_ACCEL_NOISE,
+        sigma_w_noise=SIGMA_GYRO_NOISE,
+        sigma_a_walk=SIGMA_ACCEL_WALK,
+        sigma_w_walk=SIGMA_GYRO_WALK,
+        g=G,
+    )
 
     store_idx = 0
     for i in range(n_steps):
         t = i * DT
-        if t > START_TIME:
-            if not first_states_logged:
-                np.set_printoptions(precision=3)
-                print("time: ", t)
-                print("nominal state: ", kf.x_nom)
-                print("covariance in position: ", kf.f.P[0:3, 0:3])
-                print("covariance in velocity: ", kf.f.P[3:6, 3:6])
-                print("covariance in orientation: ", kf.f.P[6:9, 6:9])
-                print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
-                print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
-                first_states_logged = True
-            a_m, w_m = sim.get_imu_reading(t)
-            kf.predict(np.concatenate((a_m, w_m)), DT)
+        if not first_states_logged:
+            np.set_printoptions(precision=3)
+            print("time: ", t)
+            print("nominal state: ", kf.x_nom)
+            print("covariance in position: ", kf.f.P[0:3, 0:3])
+            print("covariance in velocity: ", kf.f.P[3:6, 3:6])
+            print("covariance in orientation: ", kf.f.P[6:9, 6:9])
+            print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
+            print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
+            first_states_logged = True
+        a_m, w_m = sim.get_imu_reading(t)
+        kf.predict(np.concatenate((a_m, w_m)), DT)
 
         if i % GPS_INTERVAL == 0:
             z = sim.get_gps_reading()
-            if not first_gps_read:
-                kf.x_nom[0:3] = z
-                kf.f.P[0:3, 0:3] = R_gps
-                kf.f.P[3:6, 3:6] = np.eye(3) * 0.1**2
-                kf.f.P[9:12, 9:12] = np.eye(3) * 0.1**2
-                kf.f.P[12:15, 12:15] = np.eye(3) * 0.1**2
-                print("first pos: ", kf.x_nom[0:3])
-                print("first covariance: ", kf.f.P[0:3, 0:3])
-                first_gps_read = True
-            else:
-                if t < START_TIME:
-                    print(
-                        "pos, covariance before update: ",
-                        kf.x_nom[0:3],
-                        kf.f.P[0:3, 0:3],
-                    )
-                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
-                    gps_log_likelihoods.append(ll)
-                    gps_ll_times.append(t)
-                    print(
-                        "pos, covariance after update: ",
-                        kf.x_nom[0:3],
-                        kf.f.P[0:3, 0:3],
-                    )
-                else:
-                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
-                    gps_log_likelihoods.append(ll)
-                    gps_ll_times.append(t)
+            ll = kf.update(h_gps, z, R_gps, H_x_gps)
+            gps_log_likelihoods.append(ll)
+            gps_ll_times.append(t)
 
-        if i % ALTIMETER_INTERVAL == 0 and t > START_TIME:
+        if i % ALTIMETER_INTERVAL == 0:
             z = np.array([sim.get_altimeter_reading()])
             ll = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
             alt_log_likelihoods.append(ll)
             alt_ll_times.append(t)
 
         if i % MAGNETOMETER_INTERVAL == 0:
-            if t < START_TIME:
-                a_m, w_m = sim.get_imu_reading(t)
-                m_m = sim.get_magnetometer_reading()
-                q, R_cov = get_orientation_and_covariance(
-                    a_m,
-                    m_m,
-                    np.ones(3) * SIGMA_ACCEL_NOISE,
-                    np.ones(3) * SIGMA_MAGNETOMETER,
-                )
-                kf.x_nom[6:10] = q
-                kf.f.P[6:9, 6:9] = R_cov
-            else:
-                z = sim.get_magnetometer_reading()
-                z = z / np.linalg.norm(z)
-                q0, q1, q2, q3 = kf.x_nom[6:10]
-                p = np.array([q1, q2, q3])
+            z = sim.get_magnetometer_reading()
+            z = z / np.linalg.norm(z)
+            q0, q1, q2, q3 = kf.x_nom[6:10]
+            p = np.array([q1, q2, q3])
 
-                H_x_magnetometer = np.zeros((3, 16))
-                H_x_magnetometer[0:3, 6:7] = 2 * (
-                    q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-                )
-                H_x_magnetometer[0:3, 7:10] = 2 * (
-                    np.dot(p, NORTH) * np.eye(3)
-                    + np.outer(p, NORTH)
-                    - np.outer(NORTH, p)
-                    + q0 * skew_symmetric(NORTH)
-                )
+            H_x_magnetometer = np.zeros((3, 16))
+            H_x_magnetometer[0:3, 6:7] = 2 * (
+                q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
+            )
+            H_x_magnetometer[0:3, 7:10] = 2 * (
+                np.dot(p, NORTH) * np.eye(3)
+                + np.outer(p, NORTH)
+                - np.outer(NORTH, p)
+                + q0 * skew_symmetric(NORTH)
+            )
 
-                ll = kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
-                mag_log_likelihoods.append(ll)
-                mag_ll_times.append(t)
+            ll = kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+            mag_log_likelihoods.append(ll)
+            mag_ll_times.append(t)
 
         if i % downsample == 0:
             times[store_idx] = t
