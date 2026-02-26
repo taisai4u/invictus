@@ -5,6 +5,7 @@ from filterpy.kalman import ExtendedKalmanFilter
 import numpy as np
 from scipy.spatial.transform import Rotation
 from scipy.linalg import block_diag
+from scipy.stats import chi2
 
 
 def skew_symmetric(v):
@@ -91,15 +92,28 @@ class FlightFilter:
         X_dx[10:16, 9:15] = np.eye(6)
         return X_dx
 
-    def update(self, h, z, R, H_x):
+    def update(self, h, z, R, H_x, gating_threshold=0.99):
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
-        K = self.f.P @ H.T @ np.linalg.inv(S)
+
+        # dof of the measurement
         k = len(y)
+
+        K = self.f.P @ H.T @ np.linalg.inv(S)
         log_likelihood = -0.5 * (
             k * np.log(2 * np.pi) + np.log(np.linalg.det(S)) + y @ np.linalg.solve(S, y)
         )
+
+        # mahalanobis outlier rejection
+        # D^2 = y^T * S^-1 * y
+        # We use np.linalg.solve(S, y) instead of inv(S) @ y for better numerical stability
+        D2 = y.T @ np.linalg.solve(S, y)
+        chi2_threshold = chi2.ppf(gating_threshold, k)
+        if D2 > chi2_threshold:
+            # reject measurement
+            print(f"Rejected measurement with D2 = {D2}")
+            return log_likelihood
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
@@ -292,7 +306,16 @@ class RocketSim:
 
     def get_altimeter_reading(self):
         """Barometric altimeter: z-position + noise."""
-        return self.pos[2] + randn() * self.sigma_altimeter
+        base_alt = self.pos[2] + randn() * self.sigma_altimeter
+        speed = np.linalg.norm(self.vel)
+
+        if 308 < speed < 377:
+            # simulate transsonic pressure spike
+            mach_proximity = 1.0 - abs(speed - 343) / 35.0
+
+            spike = (150.0 * mach_proximity) + (randn() * 20.0)
+            return base_alt + spike
+        return base_alt
 
     def get_magnetometer_reading(self):
         """Magnetometer: world north expressed in body frame + noise."""
@@ -314,15 +337,15 @@ I_BODY = np.diag([I_PITCH, I_YAW, I_ROLL])
 
 # --- Thrust ---
 START_TIME = 7.5  # [s]
-BURN_TIME = 8.5  # [s]
-THRUST_MAG = 600.0  # [N]
+BURN_TIME = 13.5  # [s]
+THRUST_MAG = 1200.0  # [N]
 
 # --- Launch geometry ---
 LAUNCH_ANGLE = 15.0  # degrees off vertical toward +x
 
 # --- Simulation timing ---
 DT = 0.001  # integration timestep [s] (1 kHz)
-T_MAX = 40.0  # max sim time [s]
+T_MAX = 50.0  # max sim time [s]
 
 # --- IMU noise (continuous-time specifications) ---
 SIGMA_ACCEL_NOISE = 0.5  # accelerometer white noise [m/s^2]
@@ -346,7 +369,7 @@ SIGMA_FORCE_NOISE = 0.5  # translational disturbance [N]
 SIGMA_TORQUE_NOISE = 0.01  # rotational disturbance [N·m]
 
 # --- Sensor noise for observation models ---
-SIGMA_GPS = np.array([3, 3, 100])  # GPS position noise [m]
+SIGMA_GPS = np.array([50, 50, 30])  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
@@ -384,12 +407,12 @@ def run_simulation():
         if t < START_TIME:
             return np.zeros(3)
         if t < BURN_TIME:
-            roll = 0.06 + 0.02 * np.sin(4.0 * t)
+            roll = 0.21 + 0.07 * np.sin(4.0 * t)
             pitch = 0.3 * np.sin(2.0 * t)
             yaw = -0.2 * np.cos(1.5 * t)
         elif t < BURN_TIME + 5.0:
             decay = np.exp(-(t - BURN_TIME) * 0.8)
-            roll = 0.08 * decay
+            roll = 0.28 * decay
             pitch = 0.05 * decay * np.sin(3 * t)
             yaw = 0.03 * decay * np.cos(2 * t)
         else:
@@ -469,7 +492,7 @@ def run_simulation():
     # Run
     n_steps = int(T_MAX / DT)
     downsample = 10
-    n_stored = n_steps // downsample + 1
+    n_stored = n_steps // downsample
 
     times = np.zeros(n_stored)
     positions = np.zeros((n_stored, 3))
@@ -549,7 +572,7 @@ def run_simulation():
                     gps_log_likelihoods.append(ll)
                     gps_ll_times.append(t)
 
-        if i % ALTIMETER_INTERVAL == 0 and t > START_TIME:
+        if i % ALTIMETER_INTERVAL == 0:
             z = np.array([sim.get_altimeter_reading()])
             ll = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
             alt_log_likelihoods.append(ll)
@@ -645,6 +668,7 @@ def run_simulation():
         "quats": quats,
         "body_z_world": body_z_world,
         "burn_time": BURN_TIME,
+        "start_time": START_TIME,
         "kf_positions": kf_positions,
         "kf_velocities": kf_velocities,
         "kf_eulers": kf_eulers,
@@ -777,6 +801,7 @@ def plot_results(data):
     quats = data["quats"]
     bz = data["body_z_world"]
     burn_time = data["burn_time"]
+    start_time = data["start_time"]
     kf_pos = data["kf_positions"]
     kf_vel = data["kf_velocities"]
     sigma2_pos = 2 * np.sqrt(np.maximum(data["kf_P_pos"], 0))
@@ -902,10 +927,8 @@ def plot_results(data):
 
     gt_mid = (pos.max(axis=0) + pos.min(axis=0)) / 2
     gt_range = pos.max(axis=0) - pos.min(axis=0)
-    half_extent = gt_range / 2 * 1.2
-    axis_ranges = [
-        [gt_mid[i] - half_extent[i], gt_mid[i] + half_extent[i]] for i in range(3)
-    ]
+    half_extent = gt_range.max() / 2 * 1.2
+    axis_ranges = [[gt_mid[i] - half_extent, gt_mid[i] + half_extent] for i in range(3)]
 
     fig_3d.update_layout(
         title=dict(
@@ -1259,6 +1282,12 @@ def plot_results(data):
                 col=col,
                 line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
             )
+            fig_ts.add_vline(
+                x=start_time,
+                row=row,
+                col=col,
+                line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
+            )
 
     fig_ts.update_yaxes(title_text="m", row=1, col=1)
     fig_ts.update_yaxes(title_text="m/s", row=1, col=2)
@@ -1343,6 +1372,10 @@ def plot_results(data):
         x=burn_time,
         line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
     )
+    fig_ll.add_vline(
+        x=start_time,
+        line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
+    )
     fig_ll.update_layout(
         title=dict(text="Measurement Log-Likelihood", font=dict(size=18)),
         xaxis_title="Time (s)",
@@ -1404,6 +1437,10 @@ def plot_results(data):
     fig_nees.add_vline(
         x=burn_time,
         line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
+    )
+    fig_nees.add_vline(
+        x=start_time,
+        line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
     )
     fig_nees.update_layout(
         title=dict(
