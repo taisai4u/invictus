@@ -5,6 +5,7 @@ from filterpy.kalman import ExtendedKalmanFilter
 import numpy as np
 from scipy.spatial.transform import Rotation
 from scipy.linalg import block_diag
+from scipy.stats import chi2
 
 
 def skew_symmetric(v):
@@ -469,7 +470,7 @@ def run_simulation():
     # Run
     n_steps = int(T_MAX / DT)
     downsample = 10
-    n_stored = n_steps // downsample + 1
+    n_stored = n_steps // downsample
 
     times = np.zeros(n_stored)
     positions = np.zeros((n_stored, 3))
@@ -645,6 +646,7 @@ def run_simulation():
         "quats": quats,
         "body_z_world": body_z_world,
         "burn_time": BURN_TIME,
+        "start_time": START_TIME,
         "kf_positions": kf_positions,
         "kf_velocities": kf_velocities,
         "kf_eulers": kf_eulers,
@@ -777,6 +779,7 @@ def plot_results(data):
     quats = data["quats"]
     bz = data["body_z_world"]
     burn_time = data["burn_time"]
+    start_time = data["start_time"]
     kf_pos = data["kf_positions"]
     kf_vel = data["kf_velocities"]
     sigma2_pos = 2 * np.sqrt(np.maximum(data["kf_P_pos"], 0))
@@ -902,10 +905,8 @@ def plot_results(data):
 
     gt_mid = (pos.max(axis=0) + pos.min(axis=0)) / 2
     gt_range = pos.max(axis=0) - pos.min(axis=0)
-    half_extent = gt_range / 2 * 1.2
-    axis_ranges = [
-        [gt_mid[i] - half_extent[i], gt_mid[i] + half_extent[i]] for i in range(3)
-    ]
+    half_extent = gt_range.max() / 2 * 1.2
+    axis_ranges = [[gt_mid[i] - half_extent, gt_mid[i] + half_extent] for i in range(3)]
 
     fig_3d.update_layout(
         title=dict(
@@ -1259,6 +1260,12 @@ def plot_results(data):
                 col=col,
                 line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
             )
+            fig_ts.add_vline(
+                x=start_time,
+                row=row,
+                col=col,
+                line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
+            )
 
     fig_ts.update_yaxes(title_text="m", row=1, col=1)
     fig_ts.update_yaxes(title_text="m/s", row=1, col=2)
@@ -1343,6 +1350,10 @@ def plot_results(data):
         x=burn_time,
         line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
     )
+    fig_ll.add_vline(
+        x=start_time,
+        line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
+    )
     fig_ll.update_layout(
         title=dict(text="Measurement Log-Likelihood", font=dict(size=18)),
         xaxis_title="Time (s)",
@@ -1404,6 +1415,10 @@ def plot_results(data):
     fig_nees.add_vline(
         x=burn_time,
         line=dict(color="rgba(255,100,100,0.4)", width=1, dash="dash"),
+    )
+    fig_nees.add_vline(
+        x=start_time,
+        line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
     )
     fig_nees.update_layout(
         title=dict(
