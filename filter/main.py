@@ -156,8 +156,6 @@ class RocketSim:
         g,
         north,
         I,
-        f_thrust_t,
-        f_torque_t,
         sigma_a_noise,
         sigma_w_noise,
         sigma_a_walk,
@@ -186,8 +184,6 @@ class RocketSim:
         self.omega = omega_0.copy()
         self.a_b = a_b_0.copy()
         self.w_b = w_b_0.copy()
-        self.f_thrust_t = f_thrust_t
-        self.f_torque_t = f_torque_t
         # IMU noise
         self.sigma_a_noise = sigma_a_noise
         self.sigma_w_noise = sigma_w_noise
@@ -203,6 +199,7 @@ class RocketSim:
         self.Cd_roll = Cd_roll
         self.Cd_pitch = Cd_pitch
         # Process noise
+        self.force_noise_world = np.zeros(3)
         self.sigma_force = sigma_force
         self.sigma_torque = sigma_torque
         self.sigma_gps = sigma_gps
@@ -255,27 +252,25 @@ class RocketSim:
             ]
         )
 
-    def step(self, t, dt, grounded=False):
+    def step(self, dt, thrust, torque, grounded=False):
         # --- Translational dynamics (world frame) ---
-        thrust_world = self.quat.apply(self.f_thrust_t(t))
+        thrust_world = self.quat.apply(thrust)
         drag_body = self._compute_aero_force()
         drag_world = self.quat.apply(drag_body)
-        force_noise_world = randn(3) * self.sigma_force
-
-        acc = (thrust_world + drag_world + force_noise_world) / self.m + self.g
+        self.force_noise_world = randn(3) * self.sigma_force
+        acc = (thrust_world + drag_world + self.force_noise_world) / self.m + self.g
         if grounded:
             acc = np.zeros(3)
         self.pos += self.vel * dt + 0.5 * acc * dt**2
         self.vel += acc * dt
 
         # --- Rotational dynamics (body frame) ---
-        torques = self.f_torque_t(t)
         aero_damping = self._compute_aero_damping_torque()
         torque_noise = randn(3) * self.sigma_torque
 
         self.quat = self.quat * Rotation.from_rotvec(self.omega * dt)
         omega_dot = self.I_inv @ (
-            torques
+            torque
             + aero_damping
             + torque_noise
             - np.cross(self.omega, self.I @ self.omega)
@@ -286,13 +281,19 @@ class RocketSim:
         self.a_b += randn(3) * self.sigma_a_walk * np.sqrt(dt)
         self.w_b += randn(3) * self.sigma_w_walk * np.sqrt(dt)
 
-    def get_imu_reading(self, t):
-        """Generate noisy IMU measurement from true state (eqs 231-232)."""
-        thrust_body = self.f_thrust_t(t) / self.m
+    def get_imu_reading(self, thrust, grounded=False):
+        thrust_body = thrust / self.m
         drag_body = self._compute_aero_force() / self.m
         gravity_body = self.quat.inv().apply(self.g)
-        gravity_body_experienced = gravity_body if t > START_TIME else np.zeros(3)
-        a_true = thrust_body + drag_body + gravity_body_experienced - gravity_body
+        gravity_body_experienced = np.zeros(3) if grounded else gravity_body
+        force_noise_body = self.quat.inv().apply(self.force_noise_world) / self.m
+        a_true = (
+            thrust_body
+            + drag_body
+            + force_noise_body
+            + gravity_body_experienced
+            - gravity_body
+        )
 
         w_true = self.omega
 
@@ -433,8 +434,6 @@ def run_simulation():
         g=G,
         north=NORTH,
         I=I_BODY,
-        f_thrust_t=f_thrust_t,
-        f_torque_t=f_torque_t,
         sigma_a_noise=SIGMA_ACCEL_NOISE,
         sigma_w_noise=SIGMA_GYRO_NOISE,
         sigma_a_walk=SIGMA_ACCEL_WALK,
@@ -458,6 +457,7 @@ def run_simulation():
     # DO NOT LEAVE THIS AS 500
     # the kinematics are non-linear for non-small errors
     # properly initialize this using the first position and orientation estimates
+    # will be initialized using the first gps reading (pre-launch)
     P = np.eye(15) * 500
     kf = FlightFilter(
         x_nom=x_nom,
@@ -527,7 +527,13 @@ def run_simulation():
     store_idx = 0
     for i in range(n_steps):
         t = i * DT
-        if t > START_TIME:
+        grounded = t < START_TIME
+        thrust = f_thrust_t(t)
+        torque = f_torque_t(t)
+
+        sim.step(DT, thrust, torque, grounded)
+
+        if not grounded:
             if not first_states_logged:
                 np.set_printoptions(precision=3)
                 print("time: ", t)
@@ -538,7 +544,7 @@ def run_simulation():
                 print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
                 print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
                 first_states_logged = True
-            a_m, w_m = sim.get_imu_reading(t)
+            a_m, w_m = sim.get_imu_reading(thrust, grounded)
             kf.predict(np.concatenate((a_m, w_m)), DT)
 
         if i % GPS_INTERVAL == 0:
@@ -546,7 +552,7 @@ def run_simulation():
             if not first_gps_read:
                 kf.x_nom[0:3] = z
                 kf.f.P[0:3, 0:3] = R_gps
-                kf.f.P[3:6, 3:6] = np.eye(3) * 0.1**2
+                kf.f.P[3:6, 3:6] = np.eye(3) * 2.0**2
                 kf.f.P[9:12, 9:12] = np.eye(3) * 0.1**2
                 kf.f.P[12:15, 12:15] = np.eye(3) * 0.1**2
                 print("first pos: ", kf.x_nom[0:3])
@@ -579,8 +585,8 @@ def run_simulation():
             alt_ll_times.append(t)
 
         if i % MAGNETOMETER_INTERVAL == 0:
-            if t < START_TIME:
-                a_m, w_m = sim.get_imu_reading(t)
+            if grounded:
+                a_m, w_m = sim.get_imu_reading(thrust, grounded)
                 m_m = sim.get_magnetometer_reading()
                 q, R_cov = get_orientation_and_covariance(
                     a_m,
@@ -656,8 +662,6 @@ def run_simulation():
             true_a_b = true_a_b[:store_idx]
             true_w_b = true_w_b[:store_idx]
             break
-
-        sim.step(t, DT, grounded=t < START_TIME)
 
     return {
         "times": times,
