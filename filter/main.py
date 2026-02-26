@@ -92,15 +92,30 @@ class FlightFilter:
         X_dx[10:16, 9:15] = np.eye(6)
         return X_dx
 
-    def update(self, h, z, R, H_x):
+    def update(self, h, z, R, H_x, gating_threshold=0.997):
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
-        K = self.f.P @ H.T @ np.linalg.inv(S)
+
+        # dof of the measurement
         k = len(y)
+
+        K = self.f.P @ H.T @ np.linalg.inv(S)
         log_likelihood = -0.5 * (
             k * np.log(2 * np.pi) + np.log(np.linalg.det(S)) + y @ np.linalg.solve(S, y)
         )
+
+        # mahalanobis outlier rejection
+        # D^2 = y^T * S^-1 * y
+        # We use np.linalg.solve(S, y) instead of inv(S) @ y for better numerical stability
+        D2 = y.T @ np.linalg.solve(S, y)
+        chi2_threshold = chi2.ppf(gating_threshold, k)
+        if D2 > chi2_threshold:
+            # reject measurement
+            print(
+                f"Rejected measurement with D2 = {D2}, DOF={k}, Threshold = {chi2_threshold}."
+            )
+            return log_likelihood, False
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
@@ -121,7 +136,7 @@ class FlightFilter:
         self.f.P = G @ self.f.P @ G.T
         self.f.x = np.zeros(15)
 
-        return log_likelihood
+        return log_likelihood, True
 
 
 # %%
@@ -531,15 +546,21 @@ def run_simulation():
 
         if i % GPS_INTERVAL == 0:
             z = sim.get_gps_reading()
-            ll = kf.update(h_gps, z, R_gps, H_x_gps)
+            ll, accepted = kf.update(h_gps, z, R_gps, H_x_gps)
             gps_log_likelihoods.append(ll)
             gps_ll_times.append(t)
+            if not accepted:
+                print("GPS measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % ALTIMETER_INTERVAL == 0:
             z = np.array([sim.get_altimeter_reading()])
-            ll = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
+            ll, accepted = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
             alt_log_likelihoods.append(ll)
             alt_ll_times.append(t)
+            if not accepted:
+                print("Altitude measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % MAGNETOMETER_INTERVAL == 0:
             z = sim.get_magnetometer_reading()
@@ -558,9 +579,14 @@ def run_simulation():
                 + q0 * skew_symmetric(NORTH)
             )
 
-            ll = kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
+            ll, accepted = kf.update(
+                h_magnetometer, z, R_magnetometer, H_x_magnetometer
+            )
             mag_log_likelihoods.append(ll)
             mag_ll_times.append(t)
+            if not accepted:
+                print("Magnetometer measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % downsample == 0:
             times[store_idx] = t
@@ -1414,7 +1440,7 @@ def plot_results(data):
         ),
     )
 
-    return fig_3d, fig_ts, fig_ll, fig_nees
+    return fig_3d, fig_ts, fig_ll, fig_nees, nees
 
 
 print("Running rocket simulation...")
@@ -1430,10 +1456,12 @@ print(f"Flight time: {t[-1]:.1f} s")
 print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
 print(f"Final quaternion: {data['quats'][-1]}")
 
-fig_3d, fig_ts, fig_ll, fig_nees = plot_results(data)
+fig_3d, fig_ts, fig_ll, fig_nees, nees = plot_results(data)
 fig_3d.show()
 fig_ts.show()
 fig_ll.show()
 fig_nees.show()
+
+print(f"Average NEES: {np.mean(nees):.3f}")
 
 # %%
