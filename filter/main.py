@@ -158,8 +158,6 @@ class RocketSim:
         g,
         north,
         I,
-        f_thrust_t,
-        f_torque_t,
         sigma_a_noise,
         sigma_w_noise,
         sigma_a_walk,
@@ -188,8 +186,6 @@ class RocketSim:
         self.omega = omega_0.copy()
         self.a_b = a_b_0.copy()
         self.w_b = w_b_0.copy()
-        self.f_thrust_t = f_thrust_t
-        self.f_torque_t = f_torque_t
         # IMU noise
         self.sigma_a_noise = sigma_a_noise
         self.sigma_w_noise = sigma_w_noise
@@ -210,6 +206,8 @@ class RocketSim:
         self.sigma_gps = sigma_gps
         self.sigma_altimeter = sigma_altimeter
         self.sigma_magnetometer = sigma_magnetometer
+
+        self.acc = np.zeros(3)
 
     def _compute_aero_force(self):
         """Compute aerodynamic drag force in body frame.
@@ -257,49 +255,44 @@ class RocketSim:
             ]
         )
 
-    def step(self, t, dt, grounded=False):
-        # --- Translational dynamics (world frame) ---
-        thrust_world = self.quat.apply(self.f_thrust_t(t))
-        drag_body = self._compute_aero_force()
-        drag_world = self.quat.apply(drag_body)
+    def step(self, dt, thrust_body, torque_body, grounded=False):
+        thrust_world = self.quat.apply(thrust_body)
+        drag_world = self.quat.apply(self._compute_aero_force())
         force_noise_world = randn(3) * self.sigma_force
 
-        acc = (thrust_world + drag_world + force_noise_world) / self.m + self.g
-        if grounded:
-            acc = np.zeros(3)
-        self.pos += self.vel * dt + 0.5 * acc * dt**2
-        self.vel += acc * dt
-
-        # --- Rotational dynamics (body frame) ---
-        torques = self.f_torque_t(t)
-        aero_damping = self._compute_aero_damping_torque()
-        torque_noise = randn(3) * self.sigma_torque
-
-        self.quat = self.quat * Rotation.from_rotvec(self.omega * dt)
-        omega_dot = self.I_inv @ (
-            torques
-            + aero_damping
-            + torque_noise
-            - np.cross(self.omega, self.I @ self.omega)
+        # Total force including gravity
+        total_force_world = (
+            thrust_world + drag_world + force_noise_world + self.m * self.g
         )
+        if grounded:
+            total_force_world -= self.m * self.g
+
+        self.acc = total_force_world / self.m
+
+        self.pos += self.vel * dt + 0.5 * self.acc * dt**2
+        self.vel += self.acc * dt
+
+        torques = (
+            torque_body
+            + self._compute_aero_damping_torque()
+            + randn(3) * self.sigma_torque
+        )
+        self.quat = self.quat * Rotation.from_rotvec(self.omega * dt)
+        omega_dot = self.I_inv @ (torques - np.cross(self.omega, self.I @ self.omega))
         self.omega += omega_dot * dt
 
-        # --- Bias random walk ---
         self.a_b += randn(3) * self.sigma_a_walk * np.sqrt(dt)
         self.w_b += randn(3) * self.sigma_w_walk * np.sqrt(dt)
 
-    def get_imu_reading(self, t):
-        """Generate noisy IMU measurement from true state (eqs 231-232)."""
-        thrust_body = self.f_thrust_t(t) / self.m
-        drag_body = self._compute_aero_force() / self.m
-        gravity_body = self.quat.inv().apply(self.g)
-        gravity_body_experienced = gravity_body if t > START_TIME else np.zeros(3)
-        a_true = thrust_body + drag_body + gravity_body_experienced - gravity_body
+    def get_imu_reading(self):
+        # Specific force is net acceleration minus gravity
+        specific_force_world = self.acc - self.g
 
-        w_true = self.omega
+        # Rotate into what the sensor actually feels in the body frame
+        specific_force_b = self.quat.inv().apply(specific_force_world)
 
-        a_m = a_true + self.a_b + randn(3) * self.sigma_a_noise
-        w_m = w_true + self.w_b + randn(3) * self.sigma_w_noise
+        a_m = specific_force_b + self.a_b + randn(3) * self.sigma_a_noise
+        w_m = self.omega + self.w_b + randn(3) * self.sigma_w_noise
         return a_m, w_m
 
     def get_gps_reading(self):
@@ -308,7 +301,16 @@ class RocketSim:
 
     def get_altimeter_reading(self):
         """Barometric altimeter: z-position + noise."""
-        return self.pos[2] + randn() * self.sigma_altimeter
+        base_alt = self.pos[2] + randn() * self.sigma_altimeter
+        speed = np.linalg.norm(self.vel)
+
+        if 308 < speed < 377:
+            # simulate transsonic pressure spike
+            mach_proximity = 1.0 - abs(speed - 343) / 35.0
+
+            spike = (150.0 * mach_proximity) + (randn() * 20.0)
+            return base_alt + spike
+        return base_alt
 
     def get_magnetometer_reading(self):
         """Magnetometer: world north expressed in body frame + noise."""
@@ -330,7 +332,7 @@ I_BODY = np.diag([I_PITCH, I_YAW, I_ROLL])
 
 # --- Thrust ---
 START_TIME = 7.5  # [s]
-BURN_TIME = 8.5  # [s]
+BURN_TIME = 13.5  # [s]
 THRUST_MAG = 600.0  # [N]
 
 # --- Launch geometry ---
@@ -338,7 +340,7 @@ LAUNCH_ANGLE = 15.0  # degrees off vertical toward +x
 
 # --- Simulation timing ---
 DT = 0.001  # integration timestep [s] (1 kHz)
-T_MAX = 40.0  # max sim time [s]
+T_MAX = 50.0  # max sim time [s]
 
 # --- IMU noise (continuous-time specifications) ---
 SIGMA_ACCEL_NOISE = 0.5  # accelerometer white noise [m/s^2]
@@ -362,7 +364,7 @@ SIGMA_FORCE_NOISE = 0.5  # translational disturbance [N]
 SIGMA_TORQUE_NOISE = 0.01  # rotational disturbance [N·m]
 
 # --- Sensor noise for observation models ---
-SIGMA_GPS = np.array([3, 3, 100])  # GPS position noise [m]
+SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
@@ -426,8 +428,6 @@ def run_simulation():
         g=G,
         north=NORTH,
         I=I_BODY,
-        f_thrust_t=f_thrust_t,
-        f_torque_t=f_torque_t,
         sigma_a_noise=SIGMA_ACCEL_NOISE,
         sigma_w_noise=SIGMA_GYRO_NOISE,
         sigma_a_walk=SIGMA_ACCEL_WALK,
@@ -508,7 +508,7 @@ def run_simulation():
     gps = sim.get_gps_reading()
     x_nom[0:3] = gps
     P[0:3, 0:3] = R_gps
-    a_m, w_m = sim.get_imu_reading(0)
+    a_m, w_m = sim.get_imu_reading()
     m_m = sim.get_magnetometer_reading()
     q, R_cov = get_orientation_and_covariance(
         a_m,
@@ -541,7 +541,7 @@ def run_simulation():
             print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
             print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
             first_states_logged = True
-        a_m, w_m = sim.get_imu_reading(t)
+        a_m, w_m = sim.get_imu_reading()
         kf.predict(np.concatenate((a_m, w_m)), DT)
 
         if i % GPS_INTERVAL == 0:
@@ -634,7 +634,7 @@ def run_simulation():
             true_w_b = true_w_b[:store_idx]
             break
 
-        sim.step(t, DT, grounded=t < START_TIME)
+        sim.step(DT, f_thrust_t(t), f_torque_t(t), grounded=t < START_TIME)
 
     return {
         "times": times,
