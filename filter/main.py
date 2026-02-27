@@ -209,13 +209,13 @@ class RocketSim:
 
         self.acc = np.zeros(3)
 
-    def _compute_aero_force(self):
+    def _compute_aero_force(self, vel, quat):
         """Compute aerodynamic drag force in body frame.
 
         Drag is split into axial (along body z) and lateral components
         because a rocket has very different drag profiles nose-on vs sideways.
         """
-        vel_body = self.quat.inv().apply(self.vel)
+        vel_body = quat.inv().apply(vel)
         speed = np.linalg.norm(vel_body)
         if speed < 1e-6:
             return np.zeros(3)
@@ -241,7 +241,7 @@ class RocketSim:
 
         return np.array([F_lateral[0], F_lateral[1], F_axial])
 
-    def _compute_aero_damping_torque(self):
+    def _compute_aero_damping_torque(self, omega):
         """Compute aerodynamic rotational damping torque in body frame.
 
         Opposes angular rates — models the fact that a spinning/tumbling rocket
@@ -249,37 +249,75 @@ class RocketSim:
         """
         return -np.array(
             [
-                self.Cd_pitch * self.omega[0],  # pitch damping
-                self.Cd_pitch * self.omega[1],  # yaw damping
-                self.Cd_roll * self.omega[2],  # roll damping
+                self.Cd_pitch * omega[0],
+                self.Cd_pitch * omega[1],
+                self.Cd_roll * omega[2],
             ]
         )
 
-    def step(self, dt, thrust_body, torque_body, grounded=False):
-        thrust_world = self.quat.apply(thrust_body)
-        drag_world = self.quat.apply(self._compute_aero_force())
-        force_noise_world = randn(3) * self.sigma_force
+    def _derivatives(
+        self, state, thrust_body, torque_body, force_noise_world, torque_noise, grounded
+    ):
+        vel = state[3:6]
+        q = state[6:10]
+        omega = state[10:13]
 
-        # Total force including gravity
-        total_force_world = (
-            thrust_world + drag_world + force_noise_world + self.m * self.g
-        )
+        rot = Rotation.from_quat(q, scalar_first=True)
+
+        thrust_world = rot.apply(thrust_body)
+        drag_world = rot.apply(self._compute_aero_force(vel, rot))
+        total_force = thrust_world + drag_world + force_noise_world + self.m * self.g
         if grounded:
-            total_force_world -= self.m * self.g
+            total_force -= self.m * self.g
 
-        self.acc = total_force_world / self.m
+        acc = total_force / self.m
 
-        self.pos += self.vel * dt + 0.5 * self.acc * dt**2
-        self.vel += self.acc * dt
-
-        torques = (
-            torque_body
-            + self._compute_aero_damping_torque()
-            + randn(3) * self.sigma_torque
+        qw, qx, qy, qz = q
+        wx, wy, wz = omega
+        q_dot = 0.5 * np.array(
+            [
+                -qx * wx - qy * wy - qz * wz,
+                qw * wx + qy * wz - qz * wy,
+                qw * wy - qx * wz + qz * wx,
+                qw * wz + qx * wy - qy * wx,
+            ]
         )
-        self.quat = self.quat * Rotation.from_rotvec(self.omega * dt)
-        omega_dot = self.I_inv @ (torques - np.cross(self.omega, self.I @ self.omega))
-        self.omega += omega_dot * dt
+
+        torques = torque_body + self._compute_aero_damping_torque(omega) + torque_noise
+        omega_dot = self.I_inv @ (torques - np.cross(omega, self.I @ omega))
+
+        return np.concatenate([vel, acc, q_dot, omega_dot])
+
+    def step(self, dt, thrust_body, torque_body, grounded=False):
+        force_noise_world = randn(3) * self.sigma_force
+        torque_noise = randn(3) * self.sigma_torque
+
+        state = np.concatenate(
+            [self.pos, self.vel, self.quat.as_quat(scalar_first=True), self.omega]
+        )
+        args = (thrust_body, torque_body, force_noise_world, torque_noise, grounded)
+
+        k1 = dt * self._derivatives(state, *args)
+        k2 = dt * self._derivatives(state + 0.5 * k1, *args)
+        k3 = dt * self._derivatives(state + 0.5 * k2, *args)
+        k4 = dt * self._derivatives(state + k3, *args)
+
+        state_new = state + (k1 + 2 * k2 + 2 * k3 + k4) / 6
+
+        self.pos = state_new[0:3]
+        self.vel = state_new[3:6]
+        q_new = state_new[6:10]
+        q_new /= np.linalg.norm(q_new)
+        self.quat = Rotation.from_quat(q_new, scalar_first=True)
+        self.omega = state_new[10:13]
+
+        # Store final acceleration for IMU reading
+        thrust_world = self.quat.apply(thrust_body)
+        drag_world = self.quat.apply(self._compute_aero_force(self.vel, self.quat))
+        total_force = thrust_world + drag_world + force_noise_world + self.m * self.g
+        if grounded:
+            total_force -= self.m * self.g
+        self.acc = total_force / self.m
 
         self.a_b += randn(3) * self.sigma_a_walk * np.sqrt(dt)
         self.w_b += randn(3) * self.sigma_w_walk * np.sqrt(dt)
@@ -370,7 +408,7 @@ SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
 GPS_INTERVAL = 300
 ALTIMETER_INTERVAL = 100
-MAGNETOMETER_INTERVAL = 234
+MAGNETOMETER_INTERVAL = 50
 
 # %%
 # ============================================================
@@ -1457,9 +1495,7 @@ def plot_results(data):
         line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
     )
     fig_nees.update_layout(
-        title=dict(
-            text="NEES by State Group", font=dict(size=18)
-        ),
+        title=dict(text="NEES by State Group", font=dict(size=18)),
         xaxis_title="Time (s)",
         yaxis_title="NEES",
         paper_bgcolor="rgb(20, 20, 35)",
