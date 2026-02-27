@@ -1383,6 +1383,15 @@ def plot_results(data):
     x_nom_full = data["kf_x_nom_full"]
     P_full = data["kf_P_full"]
 
+    state_groups = [
+        ("Position", slice(0, 3), slice(0, 3)),
+        ("Velocity", slice(3, 6), slice(3, 6)),
+        ("Attitude", slice(6, 9), slice(6, 9)),
+        ("Accel Bias", slice(9, 12), slice(9, 12)),
+        ("Gyro Bias", slice(12, 15), slice(12, 15)),
+    ]
+    nees_per_group = {name: np.zeros(n) for name, _, _ in state_groups}
+
     for i in range(n):
         dx = np.zeros(15)
         dx[0:3] = pos_true[i] - x_nom_full[i, 0:3]
@@ -1394,6 +1403,18 @@ def plot_results(data):
         dx[9:12] = a_b_true[i] - x_nom_full[i, 10:13]
         dx[12:15] = w_b_true[i] - x_nom_full[i, 13:16]
         nees[i] = dx @ np.linalg.solve(P_full[i], dx)
+        for name, dx_sl, p_sl in state_groups:
+            dx_g = dx[dx_sl]
+            P_g = P_full[i][p_sl, p_sl]
+            nees_per_group[name][i] = dx_g @ np.linalg.solve(P_g, dx_g)
+
+    group_colors = {
+        "Position": "#339af0",
+        "Velocity": "#51cf66",
+        "Attitude": "#ffd43b",
+        "Accel Bias": "#ff6b6b",
+        "Gyro Bias": "#e599f7",
+    }
 
     fig_nees = go.Figure()
     fig_nees.add_trace(
@@ -1401,14 +1422,30 @@ def plot_results(data):
             x=times,
             y=nees,
             mode="lines",
-            line=dict(color="#51cf66", width=1.5),
-            name="NEES",
+            line=dict(color="rgba(255,255,255,0.3)", width=1),
+            name="Total NEES",
         )
+    )
+    for name, _, _ in state_groups:
+        fig_nees.add_trace(
+            go.Scatter(
+                x=times,
+                y=nees_per_group[name],
+                mode="lines",
+                line=dict(color=group_colors[name], width=1.5),
+                name=name,
+            )
+        )
+    fig_nees.add_hline(
+        y=3,
+        line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"),
+        annotation_text="E[NEES] per group = 3",
+        annotation_font_color="white",
     )
     fig_nees.add_hline(
         y=15,
         line=dict(color="rgba(255,255,255,0.4)", width=1, dash="dash"),
-        annotation_text="E[NEES] = dim(x) = 15",
+        annotation_text="E[NEES] total = 15",
         annotation_font_color="white",
     )
     fig_nees.add_vline(
@@ -1421,7 +1458,7 @@ def plot_results(data):
     )
     fig_nees.update_layout(
         title=dict(
-            text="NEES (Normalized Estimation Error Squared)", font=dict(size=18)
+            text="NEES by State Group", font=dict(size=18)
         ),
         xaxis_title="Time (s)",
         yaxis_title="NEES",
@@ -1429,7 +1466,7 @@ def plot_results(data):
         plot_bgcolor="rgb(25, 25, 40)",
         font=dict(color="white", size=10),
         width=900,
-        height=400,
+        height=500,
         xaxis=dict(
             gridcolor="rgba(255,255,255,0.07)",
             zerolinecolor="rgba(255,255,255,0.15)",
