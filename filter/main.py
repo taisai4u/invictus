@@ -48,7 +48,7 @@ class FlightFilter:
 
     def predict(self, u, dt):
         V_i = np.eye(3) * (self.sigma_a_noise**2) * dt**2
-        Theta_i = np.eye(3) * (self.sigma_w_noise**2) * dt**2
+        Theta_i = np.eye(3) * (self.sigma_w_noise**2) * dt**2 * 40
         A_i = np.eye(3) * (self.sigma_a_walk**2) * dt
         Omega_i = np.eye(3) * (self.sigma_w_walk**2) * dt
         F_i = np.vstack(
@@ -371,7 +371,7 @@ I_BODY = np.diag([I_PITCH, I_YAW, I_ROLL])
 # --- Thrust ---
 START_TIME = 7.5  # [s]
 BURN_TIME = 13.5  # [s]
-THRUST_MAG = 600.0  # [N]
+THRUST_MAG = 1200.0  # [N]
 
 # --- Launch geometry ---
 LAUNCH_ANGLE = 15.0  # degrees off vertical toward +x
@@ -541,8 +541,8 @@ def run_simulation():
     # initialize the filter
     x_nom = np.zeros(16)
     P = np.eye(15) * 500
-    P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_WALK**2 * 10
-    P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_WALK**2 * 10
+    P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_WALK**2 * 2
+    P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_WALK**2 * 2
     gps = sim.get_gps_reading()
     x_nom[0:3] = gps
     P[0:3, 0:3] = R_gps
