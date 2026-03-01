@@ -1518,25 +1518,26 @@ def plot_results(data):
     return fig_3d, fig_ts, fig_ll, fig_nees, nees
 
 
-print("Running rocket simulation...")
-data = run_simulation()
+if __name__ == "__main__":
+    print("Running rocket simulation...")
+    data = run_simulation()
 
-t = data["times"]
-pos = data["positions"]
-apogee_idx = np.argmax(pos[:, 2])
-print(f"Apogee: {pos[apogee_idx, 2]:.1f} m at t={t[apogee_idx]:.1f} s")
-print(f"Max speed: {np.max(np.linalg.norm(data['velocities'], axis=1)):.1f} m/s")
-print(f"Max roll rate: {np.max(np.abs(np.degrees(data['omegas'][:, 2]))):.1f} °/s")
-print(f"Flight time: {t[-1]:.1f} s")
-print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
-print(f"Final quaternion: {data['quats'][-1]}")
+    t = data["times"]
+    pos = data["positions"]
+    apogee_idx = np.argmax(pos[:, 2])
+    print(f"Apogee: {pos[apogee_idx, 2]:.1f} m at t={t[apogee_idx]:.1f} s")
+    print(f"Max speed: {np.max(np.linalg.norm(data['velocities'], axis=1)):.1f} m/s")
+    print(f"Max roll rate: {np.max(np.abs(np.degrees(data['omegas'][:, 2]))):.1f} °/s")
+    print(f"Flight time: {t[-1]:.1f} s")
+    print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
+    print(f"Final quaternion: {data['quats'][-1]}")
 
-fig_3d, fig_ts, fig_ll, fig_nees, nees = plot_results(data)
-fig_3d.show()
-fig_ts.show()
-fig_ll.show()
-fig_nees.show()
+    fig_3d, fig_ts, fig_ll, fig_nees, nees = plot_results(data)
+    fig_3d.show()
+    fig_ts.show()
+    fig_ll.show()
+    fig_nees.show()
 
-print(f"Average NEES: {np.mean(nees):.3f}")
+    print(f"Average NEES: {np.mean(nees):.3f}")
 
 # %%
