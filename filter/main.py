@@ -553,6 +553,8 @@ def run_simulation():
         m_m,
         np.ones(3) * SIGMA_ACCEL_NOISE,
         np.ones(3) * SIGMA_MAGNETOMETER,
+        G,
+        NORTH,
     )
     x_nom[6:10] = q
     P[6:9, 6:9] = R_cov
@@ -708,7 +710,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m):
+def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m, g, north):
     a_m = np.asarray(a_m, dtype=float)
     m_m = np.asarray(m_m, dtype=float)
 
@@ -728,8 +730,8 @@ def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m):
     M_B = np.column_stack((v1_b, v2_b, v3_b))
 
     # reference vectors
-    w_a = -G
-    w_m = NORTH
+    w_a = -g
+    w_m = north
 
     # reference orthogonal basis
     v1_w = w_a
