@@ -48,7 +48,7 @@ class FlightFilter:
 
     def predict(self, u, dt):
         V_i = np.eye(3) * (self.sigma_a_noise**2) * dt**2
-        Theta_i = np.eye(3) * (self.sigma_w_noise**2) * dt**2 * 40
+        Theta_i = np.eye(3) * (self.sigma_w_noise**2) * dt**2
         A_i = np.eye(3) * (self.sigma_a_walk**2) * dt
         Omega_i = np.eye(3) * (self.sigma_w_walk**2) * dt
         F_i = np.vstack(
@@ -115,6 +115,7 @@ class FlightFilter:
             print(
                 f"Rejected measurement with D2 = {D2}, DOF={k}, Threshold = {chi2_threshold}."
             )
+            print(f"z: {z}, h(x_nom): {h(self.x_nom)}")
             return log_likelihood, False
 
         # update error state: x, P
@@ -734,7 +735,7 @@ def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m, g, north):
     w_m = north
 
     # reference orthogonal basis
-    v1_w = w_a
+    v1_w = w_a / np.linalg.norm(w_a)
     v2_w = np.cross(v1_w, w_m)
     v2_w = v2_w / np.linalg.norm(v2_w)
     v3_w = np.cross(v1_w, v2_w)
