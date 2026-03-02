@@ -39,19 +39,22 @@ NORTH = np.array(
 # noise_rms = noise_density * sqrt(sample_rate * 1.57)
 # The 1.57 factor is a common approximation for the "noise equivalent bandwidth" of a first-order low-pass filter.)
 # noise density from datasheet: 150 μg/√Hz (too optimistic for real-world)
-SIGMA_ACCEL_NOISE = (
-    150 * 9.81 * 1e-6 * np.sqrt(100 * 1.57)
-) * 2  # accelerometer white noise [m/s^2]
-SIGMA_GYRO_NOISE = (
-    0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
-)  # 0.014 deg / s / sqrt(Hz)
+# SIGMA_ACCEL_NOISE = (
+#     150 * 9.81 * 1e-6 * np.sqrt(100 * 1.57)
+# )  # accelerometer white noise [m/s^2]
+SIGMA_ACCEL_NOISE = 0.025  # experimentally determined
+# SIGMA_GYRO_NOISE = (
+#     0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
+# )  # 0.014 deg / s / sqrt(Hz)
+SIGMA_GYRO_NOISE = 0.0026  # experimentally determined
 SIGMA_ACCEL_WALK = 0.01  # accelerometer bias random walk [m/s^2/√s] (estimate)
 SIGMA_GYRO_WALK = 0.003  # gyroscope bias random walk [rad/s/√s] (estimate)
 
 # --- Sensor noise for observation models ---
 SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
-SIGMA_BAROMETER = 1.3  # barometer noise [Pa]
-SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
+SIGMA_BAROMETER = 3.812  # barometer noise [Pa]
+# SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
+SIGMA_MAGNETOMETER = 3.911  # experimentally determined
 
 MAG_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
 ACCEL_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
