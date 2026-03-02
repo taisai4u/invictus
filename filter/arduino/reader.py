@@ -38,13 +38,15 @@ NORTH = np.array(
 # --- IMU noise (continuous-time specifications) ---
 # noise_rms = noise_density * sqrt(sample_rate * 1.57)
 # The 1.57 factor is a common approximation for the "noise equivalent bandwidth" of a first-order low-pass filter.)
-# noise density from datasheet: 150 μg/√Hz
+# noise density from datasheet: 150 μg/√Hz (too optimistic for real-world)
 SIGMA_ACCEL_NOISE = (
-    150 * np.sqrt(1000 * 1.57) * 9.81 * 1e-6
-)  # accelerometer white noise [m/s^2]
-SIGMA_GYRO_NOISE = 0.1  # gyroscope white noise [rad/s]
-SIGMA_ACCEL_WALK = 0.001  # accelerometer bias random walk [m/s^2/√s]
-SIGMA_GYRO_WALK = 0.0001  # gyroscope bias random walk [rad/s/√s]
+    150 * 9.81 * 1e-6 * np.sqrt(100 * 1.57)
+) * 2  # accelerometer white noise [m/s^2]
+SIGMA_GYRO_NOISE = (
+    0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
+)  # 0.014 deg / s / sqrt(Hz)
+SIGMA_ACCEL_WALK = 0.01  # accelerometer bias random walk [m/s^2/√s] (estimate)
+SIGMA_GYRO_WALK = 0.003  # gyroscope bias random walk [rad/s/√s] (estimate)
 
 # --- Sensor noise for observation models ---
 SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
@@ -166,7 +168,9 @@ def is_mag_interference_absent(
     x_nom: np.ndarray,
 ) -> bool:
     if is_imu_static:
-        cos_angle = np.clip(np.dot(m_m, a_m) / (np.linalg.norm(m_m) * np.linalg.norm(a_m)), -1, 1)
+        cos_angle = np.clip(
+            np.dot(m_m, a_m) / (np.linalg.norm(m_m) * np.linalg.norm(a_m)), -1, 1
+        )
         x = np.abs(np.arccos(cos_angle))
         D2 = (x - static_accel_mag_angle_mean) ** 2 / static_accel_mag_angle_var
         criterion_m1 = D2 < chi2.ppf(0.997, 1)
@@ -175,7 +179,12 @@ def is_mag_interference_absent(
         yaw_angvel_mag = np.abs(
             (1 / dt)
             * np.arccos(
-                np.clip(np.dot(m_m, last_m_m) / (np.linalg.norm(m_m) * np.linalg.norm(last_m_m)), -1, 1)
+                np.clip(
+                    np.dot(m_m, last_m_m)
+                    / (np.linalg.norm(m_m) * np.linalg.norm(last_m_m)),
+                    -1,
+                    1,
+                )
             )
         )
         phi, theta, psi = Rotation.from_quat(x_nom[6:10], scalar_first=True).as_euler(
@@ -238,6 +247,9 @@ def main():
         g_body = world_orientation.inv().apply(-G)
         return g_body / np.linalg.norm(g_body)
 
+    def h_velocity(x_nom):
+        return x_nom[3:6]
+
     # calibration
     print("Calibrating...")
     for reading in read_packets(port):
@@ -297,6 +309,18 @@ def main():
                     last_m_m_norm = (
                         np.linalg.norm(last_m_m) if last_m_m is not None else 0
                     )
+                    if imu_static:
+                        # ZUPT (zero-velocity update)
+                        # since we've detected that the IMU is static,
+                        # we create a synthetic "measurement" of velocity that's set to zero
+                        # so the filter will update toward zero velocity
+                        z = np.zeros(3)
+                        H_x_zupt = np.zeros((3, 16))
+                        H_x_zupt[0:3, 3:6] = np.eye(3)
+                        R_zupt = np.eye(3) * 0.01**2  # to be determined empirically
+                        ll, accepted = kf.update(
+                            h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
+                        )
                     if (
                         t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US
                         and mag_norm > 0
@@ -360,6 +384,7 @@ def main():
                                 H_x_accel,
                                 gating_threshold=0.997,
                             )
+
                             if not accepted:
                                 print(f"Accelerometer measurement rejected at t={t}us")
                             else:
@@ -382,25 +407,25 @@ def main():
                     H_x_barometer[0, 2] = (
                         -1000 * SEA_LEVEL_PRESSURE * ratio ** (8097 / 1903) / 8435999
                     )
-            #         ll, accepted = kf.update(
-            #             h_barometer,
-            #             np.array([p]),
-            #             R_barometer,
-            #             H_x_barometer,
-            #             # gating_threshold=1,
-            #         )
-            #         if not accepted:
-            #             print(
-            #                 f"Barometer measurement rejected at t={t}us, p={p:.2f} Pa",
-            #             )
-            #             print(
-            #                 f"filter altitude: {kf.x_nom[2]} m, covariance: {kf.f.P[2, 2]}"
-            #             )
-            #             print(
-            #                 f"""measured pressure to altitude: {pressure_to_altitude(p)} m, covariance: {(
-            #     (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
-            # ) ** 2}"""
-            #             )
+                    ll, accepted = kf.update(
+                        h_barometer,
+                        np.array([p]),
+                        R_barometer,
+                        H_x_barometer,
+                        # gating_threshold=1,
+                    )
+                    if not accepted:
+                        print(
+                            f"Barometer measurement rejected at t={t}us, p={p:.2f} Pa",
+                        )
+                        print(
+                            f"filter altitude: {kf.x_nom[2]} m, covariance: {kf.f.P[2, 2]}"
+                        )
+                        print(
+                            f"""measured pressure to altitude: {pressure_to_altitude(p)} m, covariance: {(
+                (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
+            ) ** 2}"""
+                        )
 
         if not kf and first_imu_reading and first_baro_reading:
             print(
@@ -430,11 +455,14 @@ def main():
                 )
             )
             p = first_baro_reading.pressure_pa
-            P = np.eye(15) * 500
-            P[0:3, 0:3] = np.eye(3) * SIGMA_GPS**2
+            P = np.zeros((15, 15))
+            P[0:2, 0:2] = (
+                np.eye(2) * 0.01**2
+            )  # horizontal position: self-defined origin
             P[2, 2] = (
                 (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
-            ) ** 2
+            ) ** 2  # altitude from barometer
+            P[3:6, 3:6] = np.eye(3) * 0.01**2  # velocity: starts stationary
             P[6:9, 6:9] = R_cov
             SIGMA_ACCEL_BIAS_INIT = 1.0  # BNO055 accel offset: typical 80mg, max 150mg
             SIGMA_GYRO_BIAS_INIT = np.radians(
