@@ -1,5 +1,6 @@
 import struct
 import sys
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -51,6 +52,7 @@ SIGMA_BAROMETER = 1.3  # barometer noise [Pa]
 SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
 
 MAG_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
+ACCEL_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
 
 SEA_LEVEL_PRESSURE = 101325.0
 CALIBRATION_DURATION_US = 5 * 1e6  # 5 seconds
@@ -146,10 +148,49 @@ def is_imu_static(
     static_gyro_ln_magnitude_var: float,
 ) -> bool:
     criterion_a1 = np.abs(np.linalg.norm(a_m) - np.linalg.norm(g)) < 0.2
-    x = np.log(np.linalg.norm(w_m))
+    x = np.log(np.linalg.norm(w_m) + 0.00001)
     D2 = (x - static_gyro_ln_magnitude_mean) ** 2 / static_gyro_ln_magnitude_var
     criterion_a2 = D2 < chi2.ppf(0.997, 1)
     return criterion_a1 and criterion_a2
+
+
+def is_mag_interference_absent(
+    a_m: np.ndarray,
+    w_m: np.ndarray,
+    m_m: np.ndarray,
+    static_accel_mag_angle_mean: float,
+    static_accel_mag_angle_var: float,
+    is_imu_static: bool,
+    last_m_m: np.ndarray,
+    dt: float,
+    x_nom: np.ndarray,
+) -> bool:
+    if is_imu_static:
+        x = np.abs(
+            np.arccos(np.dot(m_m, a_m) / (np.linalg.norm(m_m) * np.linalg.norm(a_m)))
+        )
+        D2 = (x - static_accel_mag_angle_mean) ** 2 / static_accel_mag_angle_var
+        criterion_m1 = D2 < chi2.ppf(0.997, 1)
+        return criterion_m1
+    else:
+        yaw_angvel_mag = np.abs(
+            (1 / dt)
+            * np.arccos(
+                np.dot(m_m, last_m_m) / (np.linalg.norm(m_m) * np.linalg.norm(last_m_m))
+            )
+        )
+        phi, theta, psi = Rotation.from_quat(x_nom[6:10], scalar_first=True).as_euler(
+            "xyz", degrees=False
+        )
+        yaw_angvel_gyro = np.abs(
+            -(np.sin(phi) / np.cos(theta)) * w_m[1]
+            + (np.cos(phi) / np.cos(theta)) * w_m[2]
+        )
+        criterion_m2 = (
+            np.abs(yaw_angvel_mag - yaw_angvel_gyro)
+            <= 10.0 * np.pi / 180.0  # 10 degrees/s
+        )
+        return criterion_m2
 
 
 def main():
@@ -162,6 +203,8 @@ def main():
     baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
 
     port = serial.Serial(port_name, baud)
+    time.sleep(2)  # wait for Arduino to reset after serial open
+    port.reset_input_buffer()  # discard stale pre-reset data
     print(f"Connected to {port_name} @ {baud} baud. Waiting for packets...")
 
     first_imu_reading: ImuReading | None = None
@@ -171,11 +214,15 @@ def main():
     calibration_start_timestamp_us = 0
     last_imu_timestamp_us = 0
     last_mag_update_timestamp_us = 0
+    last_accel_update_timestamp_us = 0
     last_viz_update_timestamp_us = 0
 
     static_gyro_magnitudes = []
     static_gyro_ln_magnitude_mean = 0
     static_gyro_ln_magnitude_var = 0
+    static_accel_mag_angles = []
+    static_accel_mag_angle_mean = 0
+    static_accel_mag_angle_var = 0
 
     def h_barometer(x_nom):
         ratio = max(1 - x_nom[2] / 44330, 1e-12)
@@ -187,6 +234,11 @@ def main():
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
         return world_orientation.inv().apply(NORTH)
 
+    def h_accelerometer(x_nom):
+        world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
+        g_body = world_orientation.inv().apply(-G)
+        return g_body / np.linalg.norm(g_body)
+
     # calibration
     print("Calibrating...")
     for reading in read_packets(port):
@@ -195,10 +247,13 @@ def main():
                 if calibration_start_timestamp_us == 0:
                     calibration_start_timestamp_us = t
                 static_gyro_magnitudes.append(np.linalg.norm(w))
+                theta = np.abs(
+                    np.arccos(np.dot(m, a) / (np.linalg.norm(m) * np.linalg.norm(a)))
+                )
+                static_accel_mag_angles.append(theta)
                 if t - calibration_start_timestamp_us > CALIBRATION_DURATION_US:
-                    print("calibration duration reached")
                     static_gyro_ln_magnitude = np.log(
-                        np.array(static_gyro_magnitudes) + 0.001
+                        np.array(static_gyro_magnitudes) + 0.00001
                     )
                     static_gyro_ln_magnitude_mean = np.mean(
                         static_gyro_ln_magnitude
@@ -206,6 +261,9 @@ def main():
                     static_gyro_ln_magnitude_var = np.var(
                         static_gyro_ln_magnitude
                     ).item()
+                    static_accel_mag_angle = np.array(static_accel_mag_angles)
+                    static_accel_mag_angle_mean = np.mean(static_accel_mag_angle).item()
+                    static_accel_mag_angle_var = np.var(static_accel_mag_angle).item()
                     break
             case BaroReading(timestamp_us=t, pressure_pa=p):
                 pass
@@ -215,6 +273,8 @@ def main():
 
     viz = LiveVisualizer()
     viz.process_events()
+
+    last_m_m: np.ndarray | None = None
 
     for reading in read_packets(port):
         match reading:
@@ -227,10 +287,11 @@ def main():
                     u = np.concatenate((a, w))
                     # print(f"Predicting with u={u}")
                     kf.predict(u, dt)
-                    if t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US:
+                    if (
+                        t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US
+                        and last_m_m is not None
+                    ):
                         z = m / np.linalg.norm(m)
-                        q0, q1, q2, q3 = kf.x_nom[6:10]
-                        p = np.array([q1, q2, q3])
 
                         H_x_magnetometer = np.zeros((3, 16))
                         rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
@@ -242,27 +303,73 @@ def main():
                             / np.linalg.norm(m) ** 2
                         )
 
-                        if not is_imu_static(
+                        imu_static = is_imu_static(
                             a,
                             w,
                             G,
                             static_gyro_ln_magnitude_mean,
                             static_gyro_ln_magnitude_var,
-                        ):
-                            print(f"IMU is not static at t={t}us")
-                        ll, accepted = kf.update(
-                            h_magnetometer,
-                            z,
-                            R_magnetometer,
-                            H_x_magnetometer,
-                            gating_threshold=0.997,
                         )
-                        if not accepted:
-                            print(
-                                f"Magnetometer measurement rejected at t={t}us",
+                        mag_interference_absent = is_mag_interference_absent(
+                            a,
+                            w,
+                            m,
+                            static_accel_mag_angle_mean,
+                            static_accel_mag_angle_var,
+                            imu_static,
+                            last_m_m,
+                            dt,
+                            kf.x_nom,
+                        )
+                        if mag_interference_absent:
+                            ll, accepted = kf.update(
+                                h_magnetometer,
+                                z,
+                                R_magnetometer,
+                                H_x_magnetometer,
+                                gating_threshold=0.997,
                             )
-                            print(f"measurement: {m}")
-                        last_mag_update_timestamp_us = t
+                            if not accepted:
+                                print(
+                                    f"Magnetometer measurement rejected at t={t}us",
+                                )
+                                print(f"measurement: {m}")
+                            else:
+                                last_mag_update_timestamp_us = t
+                        else:
+                            print(f"Magnetometer interference present at t={t}us")
+                    if t - last_accel_update_timestamp_us > ACCEL_UPDATE_INTERVAL_US:
+                        imu_static = is_imu_static(
+                            a,
+                            w,
+                            G,
+                            static_gyro_ln_magnitude_mean,
+                            static_gyro_ln_magnitude_var,
+                        )
+                        if imu_static:
+                            z = a / np.linalg.norm(a)
+
+                            H_x_accel = np.zeros((3, 16))
+                            rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
+                            H_x_accel[0:3, 6:10] = kf.get_inverse_rotation_H_x(-G)
+                            R_accel = (
+                                np.eye(3)
+                                * SIGMA_ACCEL_NOISE**2
+                                / np.linalg.norm(a) ** 2
+                            )
+                            ll, accepted = kf.update(
+                                h_accelerometer,
+                                z,
+                                R_accel,
+                                H_x_accel,
+                                gating_threshold=0.997,
+                            )
+                            if not accepted:
+                                print(f"Accelerometer measurement rejected at t={t}us")
+                            else:
+                                last_accel_update_timestamp_us = t
+                        else:
+                            print(f"IMU is not static at t={t}us")
 
                     if t - last_viz_update_timestamp_us > 1 / 30 * 1e6:
                         viz.update(kf.x_nom, kf.f.P)
@@ -270,6 +377,7 @@ def main():
 
                 viz.process_events()
                 last_imu_timestamp_us = t
+                last_m_m = m
             case BaroReading(timestamp_us=t, pressure_pa=p):
                 if not first_baro_reading:
                     first_baro_reading = reading
