@@ -12,6 +12,7 @@ _ELLIPSOID_COLOR = "cyan"
 _ELLIPSOID_OPACITY = 0.15
 _BG_COLOR = "#1a1a2e"
 _MAX_TRAIL_POINTS = 10000
+_MIN_PARALLEL_SCALE = 0.5  # minimum half-height of viewport in meters (1m x 1m view)
 
 
 class LiveVisualizer:
@@ -19,6 +20,10 @@ class LiveVisualizer:
         self._plotter = BackgroundPlotter(title="Live Filter Estimate")
         self._plotter.set_background(_BG_COLOR)
         self._plotter.add_axes()
+        self._plotter.show_grid(
+            xtitle="X (m)", ytitle="Y (m)", ztitle="Z (m)",
+            font_size=8, color="gray",
+        )
         self._plotter.enable_parallel_projection()
         self._plotter.view_isometric()
 
@@ -60,7 +65,12 @@ class LiveVisualizer:
 
         for actor in self._axis_actors:
             actor.SetVisibility(False)
+        self._ellipsoid_actor.SetVisibility(False)
         self._plotter.reset_camera()
+        self._plotter.camera.parallel_scale = max(
+            self._plotter.camera.parallel_scale, _MIN_PARALLEL_SCALE
+        )
+        self._ellipsoid_actor.SetVisibility(True)
         for actor in self._axis_actors:
             actor.SetVisibility(True)
 

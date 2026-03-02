@@ -166,9 +166,8 @@ def is_mag_interference_absent(
     x_nom: np.ndarray,
 ) -> bool:
     if is_imu_static:
-        x = np.abs(
-            np.arccos(np.dot(m_m, a_m) / (np.linalg.norm(m_m) * np.linalg.norm(a_m)))
-        )
+        cos_angle = np.clip(np.dot(m_m, a_m) / (np.linalg.norm(m_m) * np.linalg.norm(a_m)), -1, 1)
+        x = np.abs(np.arccos(cos_angle))
         D2 = (x - static_accel_mag_angle_mean) ** 2 / static_accel_mag_angle_var
         criterion_m1 = D2 < chi2.ppf(0.997, 1)
         return criterion_m1
@@ -176,7 +175,7 @@ def is_mag_interference_absent(
         yaw_angvel_mag = np.abs(
             (1 / dt)
             * np.arccos(
-                np.dot(m_m, last_m_m) / (np.linalg.norm(m_m) * np.linalg.norm(last_m_m))
+                np.clip(np.dot(m_m, last_m_m) / (np.linalg.norm(m_m) * np.linalg.norm(last_m_m)), -1, 1)
             )
         )
         phi, theta, psi = Rotation.from_quat(x_nom[6:10], scalar_first=True).as_euler(
@@ -287,29 +286,32 @@ def main():
                     u = np.concatenate((a, w))
                     # print(f"Predicting with u={u}")
                     kf.predict(u, dt)
+                    imu_static = is_imu_static(
+                        a,
+                        w,
+                        G,
+                        static_gyro_ln_magnitude_mean,
+                        static_gyro_ln_magnitude_var,
+                    )
+                    mag_norm = np.linalg.norm(m)
+                    last_m_m_norm = (
+                        np.linalg.norm(last_m_m) if last_m_m is not None else 0
+                    )
                     if (
                         t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US
+                        and mag_norm > 0
                         and last_m_m is not None
+                        and last_m_m_norm > 0
                     ):
-                        z = m / np.linalg.norm(m)
+                        z = m / mag_norm
 
                         H_x_magnetometer = np.zeros((3, 16))
                         rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
                         R_magnetometer = (
-                            np.eye(3)
-                            * SIGMA_MAGNETOMETER**2
-                            * 100
-                            / np.linalg.norm(m) ** 2
+                            np.eye(3) * SIGMA_MAGNETOMETER**2 * 100 / mag_norm**2
                         )
 
-                        imu_static = is_imu_static(
-                            a,
-                            w,
-                            G,
-                            static_gyro_ln_magnitude_mean,
-                            static_gyro_ln_magnitude_var,
-                        )
                         mag_interference_absent = is_mag_interference_absent(
                             a,
                             w,
@@ -337,15 +339,9 @@ def main():
                             else:
                                 last_mag_update_timestamp_us = t
                         else:
-                            print(f"Magnetometer interference present at t={t}us")
+                            pass
+                            # print(f"Magnetometer interference present at t={t}us")
                     if t - last_accel_update_timestamp_us > ACCEL_UPDATE_INTERVAL_US:
-                        imu_static = is_imu_static(
-                            a,
-                            w,
-                            G,
-                            static_gyro_ln_magnitude_mean,
-                            static_gyro_ln_magnitude_var,
-                        )
                         if imu_static:
                             z = a / np.linalg.norm(a)
 
@@ -368,8 +364,6 @@ def main():
                                 print(f"Accelerometer measurement rejected at t={t}us")
                             else:
                                 last_accel_update_timestamp_us = t
-                        else:
-                            print(f"IMU is not static at t={t}us")
 
                     if t - last_viz_update_timestamp_us > 1 / 30 * 1e6:
                         viz.update(kf.x_nom, kf.f.P)
