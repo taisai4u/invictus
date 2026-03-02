@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+from scipy.stats import chi2
 import serial
 
 from .visualizer import LiveVisualizer
@@ -52,6 +53,7 @@ SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
 MAG_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
 
 SEA_LEVEL_PRESSURE = 101325.0
+CALIBRATION_DURATION_US = 5 * 1e6  # 5 seconds
 
 
 @dataclass
@@ -136,6 +138,20 @@ def pressure_to_altitude(pressure_pa: float) -> float:
     return 44330 * (1 - (pressure_pa / SEA_LEVEL_PRESSURE) ** 0.1903)
 
 
+def is_imu_static(
+    a_m: np.ndarray,
+    w_m: np.ndarray,
+    g: np.ndarray,
+    static_gyro_ln_magnitude_mean: float,
+    static_gyro_ln_magnitude_var: float,
+) -> bool:
+    criterion_a1 = np.abs(np.linalg.norm(a_m) - np.linalg.norm(g)) < 0.2
+    x = np.log(np.linalg.norm(w_m))
+    D2 = (x - static_gyro_ln_magnitude_mean) ** 2 / static_gyro_ln_magnitude_var
+    criterion_a2 = D2 < chi2.ppf(0.997, 1)
+    return criterion_a1 and criterion_a2
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <serial_port> [baud]")
@@ -152,11 +168,14 @@ def main():
     first_baro_reading: BaroReading | None = None
     kf: FlightFilter | None = None
 
+    calibration_start_timestamp_us = 0
     last_imu_timestamp_us = 0
     last_mag_update_timestamp_us = 0
     last_viz_update_timestamp_us = 0
-    viz = LiveVisualizer()
-    viz.process_events()
+
+    static_gyro_magnitudes = []
+    static_gyro_ln_magnitude_mean = 0
+    static_gyro_ln_magnitude_var = 0
 
     def h_barometer(x_nom):
         ratio = max(1 - x_nom[2] / 44330, 1e-12)
@@ -168,15 +187,44 @@ def main():
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
         return world_orientation.inv().apply(NORTH)
 
+    # calibration
+    print("Calibrating...")
     for reading in read_packets(port):
         match reading:
-            case ImuReading(timestamp_us=t, accel=a, gyro=g, mag=m):
+            case ImuReading(timestamp_us=t, accel=a, gyro=w, mag=m):
+                if calibration_start_timestamp_us == 0:
+                    calibration_start_timestamp_us = t
+                static_gyro_magnitudes.append(np.linalg.norm(w))
+                if t - calibration_start_timestamp_us > CALIBRATION_DURATION_US:
+                    print("calibration duration reached")
+                    static_gyro_ln_magnitude = np.log(
+                        np.array(static_gyro_magnitudes) + 0.001
+                    )
+                    static_gyro_ln_magnitude_mean = np.mean(
+                        static_gyro_ln_magnitude
+                    ).item()
+                    static_gyro_ln_magnitude_var = np.var(
+                        static_gyro_ln_magnitude
+                    ).item()
+                    break
+            case BaroReading(timestamp_us=t, pressure_pa=p):
+                pass
+    print("Calibration complete.")
+    print(f"Static gyro ln magnitude mean: {static_gyro_ln_magnitude_mean}")
+    print(f"Static gyro ln magnitude var: {static_gyro_ln_magnitude_var}")
+
+    viz = LiveVisualizer()
+    viz.process_events()
+
+    for reading in read_packets(port):
+        match reading:
+            case ImuReading(timestamp_us=t, accel=a, gyro=w, mag=m):
                 if not first_imu_reading:
                     first_imu_reading = reading
                     print(f"First IMU reading at t={t}us")
                 elif kf:
                     dt = (t - last_imu_timestamp_us) / 1e6
-                    u = np.concatenate((a, g))
+                    u = np.concatenate((a, w))
                     # print(f"Predicting with u={u}")
                     kf.predict(u, dt)
                     if t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US:
@@ -185,15 +233,8 @@ def main():
                         p = np.array([q1, q2, q3])
 
                         H_x_magnetometer = np.zeros((3, 16))
-                        H_x_magnetometer[0:3, 6:7] = 2 * (
-                            q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-                        )
-                        H_x_magnetometer[0:3, 7:10] = 2 * (
-                            np.dot(p, NORTH) * np.eye(3)
-                            + np.outer(p, NORTH)
-                            - np.outer(NORTH, p)
-                            + q0 * skew_symmetric(NORTH)
-                        )
+                        rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
+                        H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
                         R_magnetometer = (
                             np.eye(3)
                             * SIGMA_MAGNETOMETER**2
@@ -201,12 +242,20 @@ def main():
                             / np.linalg.norm(m) ** 2
                         )
 
+                        if not is_imu_static(
+                            a,
+                            w,
+                            G,
+                            static_gyro_ln_magnitude_mean,
+                            static_gyro_ln_magnitude_var,
+                        ):
+                            print(f"IMU is not static at t={t}us")
                         ll, accepted = kf.update(
                             h_magnetometer,
                             z,
                             R_magnetometer,
                             H_x_magnetometer,
-                            # gating_threshold=1,
+                            gating_threshold=0.997,
                         )
                         if not accepted:
                             print(
@@ -231,25 +280,25 @@ def main():
                     H_x_barometer[0, 2] = (
                         -1000 * SEA_LEVEL_PRESSURE * ratio ** (8097 / 1903) / 8435999
                     )
-                    ll, accepted = kf.update(
-                        h_barometer,
-                        np.array([p]),
-                        R_barometer,
-                        H_x_barometer,
-                        # gating_threshold=1,
-                    )
-                    if not accepted:
-                        print(
-                            f"Barometer measurement rejected at t={t}us, p={p:.2f} Pa",
-                        )
-                        print(
-                            f"filter altitude: {kf.x_nom[2]} m, covariance: {kf.f.P[2, 2]}"
-                        )
-                        print(
-                            f"""measured pressure to altitude: {pressure_to_altitude(p)} m, covariance: {(
-                (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
-            ) ** 2}"""
-                        )
+            #         ll, accepted = kf.update(
+            #             h_barometer,
+            #             np.array([p]),
+            #             R_barometer,
+            #             H_x_barometer,
+            #             # gating_threshold=1,
+            #         )
+            #         if not accepted:
+            #             print(
+            #                 f"Barometer measurement rejected at t={t}us, p={p:.2f} Pa",
+            #             )
+            #             print(
+            #                 f"filter altitude: {kf.x_nom[2]} m, covariance: {kf.f.P[2, 2]}"
+            #             )
+            #             print(
+            #                 f"""measured pressure to altitude: {pressure_to_altitude(p)} m, covariance: {(
+            #     (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
+            # ) ** 2}"""
+            #             )
 
         if not kf and first_imu_reading and first_baro_reading:
             print(
@@ -286,7 +335,9 @@ def main():
             ) ** 2
             P[6:9, 6:9] = R_cov
             SIGMA_ACCEL_BIAS_INIT = 1.0  # BNO055 accel offset: typical 80mg, max 150mg
-            SIGMA_GYRO_BIAS_INIT = np.radians(3.0)  # BNO055 gyro zero-rate offset: typical ±1°/s, max +3°/s
+            SIGMA_GYRO_BIAS_INIT = np.radians(
+                3.0
+            )  # BNO055 gyro zero-rate offset: typical ±1°/s, max +3°/s
             P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_BIAS_INIT**2
             P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_BIAS_INIT**2
             print(f"Initial state: {x_nom}")

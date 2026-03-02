@@ -92,6 +92,19 @@ class FlightFilter:
         X_dx[10:16, 9:15] = np.eye(6)
         return X_dx
 
+    def get_inverse_rotation_H_x(self, vec: np.ndarray):
+        q0, q1, q2, q3 = self.x_nom[6:10]
+        p = np.array([q1, q2, q3])
+        H = np.zeros((3, 4))
+        H[0:3, 0:1] = 2 * (q0 * vec.reshape(3, 1) + np.cross(vec, p).reshape(3, 1))
+        H[0:3, 1:4] = 2 * (
+            np.dot(p, vec) * np.eye(3)
+            + np.outer(p, vec)
+            - np.outer(vec, p)
+            + q0 * skew_symmetric(vec)
+        )
+        return H
+
     def update(self, h, z, R, H_x, gating_threshold=0.997):
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
@@ -610,15 +623,7 @@ def run_simulation():
             p = np.array([q1, q2, q3])
 
             H_x_magnetometer = np.zeros((3, 16))
-            H_x_magnetometer[0:3, 6:7] = 2 * (
-                q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-            )
-            H_x_magnetometer[0:3, 7:10] = 2 * (
-                np.dot(p, NORTH) * np.eye(3)
-                + np.outer(p, NORTH)
-                - np.outer(NORTH, p)
-                + q0 * skew_symmetric(NORTH)
-            )
+            H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
 
             ll, accepted = kf.update(
                 h_magnetometer, z, R_magnetometer, H_x_magnetometer
