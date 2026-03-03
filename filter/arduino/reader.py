@@ -1,3 +1,4 @@
+import signal
 import struct
 import sys
 import time
@@ -8,7 +9,7 @@ from scipy.spatial.transform import Rotation
 from scipy.stats import chi2
 import serial
 
-from .visualizer import LiveVisualizer
+from .visualizer import LiveVisualizer, NISTracker
 from ..main import FlightFilter, get_orientation_and_covariance, skew_symmetric
 
 np.set_printoptions(precision=3)
@@ -47,8 +48,8 @@ SIGMA_ACCEL_NOISE = 0.025  # experimentally determined
 #     0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
 # )  # 0.014 deg / s / sqrt(Hz)
 SIGMA_GYRO_NOISE = 0.0026  # experimentally determined
-SIGMA_ACCEL_WALK = 0.01  # accelerometer bias random walk [m/s^2/√s] (estimate)
-SIGMA_GYRO_WALK = 0.003  # gyroscope bias random walk [rad/s/√s] (estimate)
+SIGMA_ACCEL_WALK = 0.0001  # accelerometer bias random walk [m/s^2/√s] (estimate)
+SIGMA_GYRO_WALK = 0.0001  # gyroscope bias random walk [rad/s/√s] (estimate)
 
 # --- Sensor noise for observation models ---
 SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
@@ -204,6 +205,17 @@ def is_mag_interference_absent(
         return criterion_m2
 
 
+def is_filter_consistent(nis: float, nz: int, alpha=0.05):
+    lower_bound = chi2.ppf(alpha / 2, nz)
+    upper_bound = chi2.ppf(1 - alpha / 2, nz)
+    return lower_bound <= nis <= upper_bound
+
+
+def normalization_jacobian(a: np.ndarray) -> np.ndarray:
+    a_norm = np.linalg.norm(a)
+    return (np.eye(3) - np.outer(a, a) / a_norm**2) / a_norm
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <serial_port> [baud]")
@@ -240,6 +252,7 @@ def main():
         return SEA_LEVEL_PRESSURE * ratio ** (1 / 0.1903)
 
     R_barometer = np.array([[SIGMA_BAROMETER**2]])
+    R_barometer = np.array([[6.6364]])
 
     def h_magnetometer(x_nom):
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
@@ -248,7 +261,9 @@ def main():
     def h_accelerometer(x_nom):
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
         g_body = world_orientation.inv().apply(-G)
-        return g_body / np.linalg.norm(g_body)
+        a_b = x_nom[10:13]
+        predicted = g_body + a_b
+        return predicted / np.linalg.norm(predicted)
 
     def h_velocity(x_nom):
         return x_nom[3:6]
@@ -288,6 +303,46 @@ def main():
     viz = LiveVisualizer()
     viz.process_events()
 
+    nis_trackers = {
+        "Mag": NISTracker(nz=3),
+        "Accel": NISTracker(nz=3),
+        "Baro": NISTracker(nz=1),
+        "ZUPT": NISTracker(nz=3),
+    }
+    innovations: dict[str, list[np.ndarray]] = {
+        "Mag": [],
+        "Accel": [],
+        "Baro": [],
+        "ZUPT": [],
+    }
+
+    R_VARIABLE_NAMES = {
+        "Mag": "R_magnetometer_normalized",
+        "Accel": "R_accel_normalized",
+        "Baro": "R_barometer",
+        "ZUPT": "R_zupt",
+    }
+
+    def print_innovation_covariances():
+        print("\n--- Innovation Covariances (use as R) ---")
+        for name, innov_list in innovations.items():
+            if len(innov_list) < 2:
+                print(f"{name}: not enough samples ({len(innov_list)})")
+                continue
+            innov_array = np.array(innov_list)
+            cov = np.cov(innov_array.T)
+            var_name = R_VARIABLE_NAMES[name]
+            print(f"# {name} (n={len(innov_list)}, mean={innov_array.mean(axis=0)})")
+            print(
+                f"{var_name} = np.array({np.array2string(np.atleast_2d(cov), separator=', ')})"
+            )
+
+    def handle_exit(sig, frame):
+        print_innovation_covariances()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, handle_exit)
+
     last_m_m: np.ndarray | None = None
 
     for reading in read_packets(port):
@@ -320,10 +375,20 @@ def main():
                         z = np.zeros(3)
                         H_x_zupt = np.zeros((3, 16))
                         H_x_zupt[0:3, 3:6] = np.eye(3)
-                        R_zupt = np.eye(3) * 0.01**2  # to be determined empirically
-                        ll, accepted = kf.update(
+                        diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
+                        R_zupt = np.array(
+                            [
+                                [1.131e-05, -5.442e-06, -1.518e-06],
+                                [-5.442e-06, 8.847e-06, -9.585e-07],
+                                [-1.518e-06, -9.585e-07, 3.959e-06],
+                            ]
+                        )
+                        ll, accepted, nis, innovation = kf.update(
                             h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
                         )
+                        if accepted:
+                            nis_trackers["ZUPT"].record(nis)
+                            innovations["ZUPT"].append(innovation)
                     if (
                         t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US
                         and mag_norm > 0
@@ -333,11 +398,12 @@ def main():
                         z = m / mag_norm
 
                         H_x_magnetometer = np.zeros((3, 16))
-                        rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
-                        R_magnetometer = (
-                            np.eye(3) * SIGMA_MAGNETOMETER**2 * 100 / mag_norm**2
+                        N = normalization_jacobian(m)
+                        R_magnetometer_normalized = (
+                            N @ (np.eye(3) * SIGMA_MAGNETOMETER**2) @ N.T
                         )
+                        R_magnetometer_normalized = np.eye(3) * 0.00225
 
                         mag_interference_absent = is_mag_interference_absent(
                             a,
@@ -351,10 +417,10 @@ def main():
                             kf.x_nom,
                         )
                         if mag_interference_absent:
-                            ll, accepted = kf.update(
+                            ll, accepted, nis, innovation = kf.update(
                                 h_magnetometer,
                                 z,
-                                R_magnetometer,
+                                R_magnetometer_normalized,
                                 H_x_magnetometer,
                                 gating_threshold=0.997,
                             )
@@ -365,6 +431,8 @@ def main():
                                 print(f"measurement: {m}")
                             else:
                                 last_mag_update_timestamp_us = t
+                                nis_trackers["Mag"].record(nis)
+                                innovations["Mag"].append(innovation)
                         else:
                             pass
                             # print(f"Magnetometer interference present at t={t}us")
@@ -372,29 +440,44 @@ def main():
                         if imu_static:
                             z = a / np.linalg.norm(a)
 
-                            H_x_accel = np.zeros((3, 16))
-                            rot = Rotation.from_quat(kf.x_nom[6:10], scalar_first=True)
-                            H_x_accel[0:3, 6:10] = kf.get_inverse_rotation_H_x(-G)
-                            R_accel = (
-                                np.eye(3)
-                                * SIGMA_ACCEL_NOISE**2
-                                / np.linalg.norm(a) ** 2
+                            world_orientation = Rotation.from_quat(
+                                kf.x_nom[6:10], scalar_first=True
                             )
-                            ll, accepted = kf.update(
+                            raw_pred = (
+                                world_orientation.inv().apply(-G) + kf.x_nom[10:13]
+                            )
+                            N_pred = normalization_jacobian(raw_pred)
+                            H_x_accel = np.zeros((3, 16))
+                            H_x_accel[0:3, 6:10] = N_pred @ kf.get_inverse_rotation_H_x(
+                                -G
+                            )
+                            H_x_accel[0:3, 10:13] = N_pred @ np.eye(3)
+                            N = normalization_jacobian(a)
+                            R_accel_normalized = (
+                                N @ (np.eye(3) * SIGMA_ACCEL_NOISE**2) @ N.T
+                            )
+                            R_accel_normalized = np.eye(3) * 0.0000083523
+                            ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
                                 z,
-                                R_accel,
+                                R_accel_normalized,
                                 H_x_accel,
                                 gating_threshold=0.997,
                             )
 
                             if not accepted:
                                 print(f"Accelerometer measurement rejected at t={t}us")
+                                print(f"R_accel_normalized: {R_accel_normalized}")
                             else:
                                 last_accel_update_timestamp_us = t
+                                nis_trackers["Accel"].record(nis)
+                                innovations["Accel"].append(innovation)
 
                     if t - last_viz_update_timestamp_us > 1 / 30 * 1e6:
+                        viz.update_measurements(a, m)
                         viz.update(kf.x_nom, kf.f.P)
+                        viz.update_nis_overlay(nis_trackers)
+                        viz.update_bias_overlay(kf.x_nom[10:13], kf.x_nom[13:16])
                         last_viz_update_timestamp_us = t
 
                 viz.process_events()
@@ -410,7 +493,7 @@ def main():
                     H_x_barometer[0, 2] = (
                         -1000 * SEA_LEVEL_PRESSURE * ratio ** (8097 / 1903) / 8435999
                     )
-                    ll, accepted = kf.update(
+                    ll, accepted, nis, innovation = kf.update(
                         h_barometer,
                         np.array([p]),
                         R_barometer,
@@ -429,6 +512,9 @@ def main():
                 (8436.2 / p) * ((p / SEA_LEVEL_PRESSURE) ** 0.1903) * SIGMA_BAROMETER
             ) ** 2}"""
                         )
+                    else:
+                        nis_trackers["Baro"].record(nis)
+                        innovations["Baro"].append(innovation)
 
         if not kf and first_imu_reading and first_baro_reading:
             print(
@@ -467,9 +553,11 @@ def main():
             ) ** 2  # altitude from barometer
             P[3:6, 3:6] = np.eye(3) * 0.01**2  # velocity: starts stationary
             P[6:9, 6:9] = R_cov
-            SIGMA_ACCEL_BIAS_INIT = 1.0  # BNO055 accel offset: typical 80mg, max 150mg
+            SIGMA_ACCEL_BIAS_INIT = (
+                80 * 9.81 * 1e-3
+            )  # BNO055 accel offset: typical 80mg, max 150mg
             SIGMA_GYRO_BIAS_INIT = np.radians(
-                3.0
+                1.0
             )  # BNO055 gyro zero-rate offset: typical ±1°/s, max +3°/s
             P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_BIAS_INIT**2
             P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_BIAS_INIT**2

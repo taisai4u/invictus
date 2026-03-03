@@ -129,7 +129,7 @@ class FlightFilter:
                 f"Rejected measurement with D2 = {D2}, DOF={k}, Threshold = {chi2_threshold}."
             )
             print(f"z: {z}, h(x_nom): {h(self.x_nom)}")
-            return log_likelihood, False
+            return log_likelihood, False, D2, y
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
@@ -150,7 +150,7 @@ class FlightFilter:
         self.f.P = G @ self.f.P @ G.T
         self.f.x = np.zeros(15)
 
-        return log_likelihood, True
+        return log_likelihood, True, D2, y
 
 
 # %%
@@ -600,7 +600,7 @@ def run_simulation():
 
         if i % GPS_INTERVAL == 0:
             z = sim.get_gps_reading()
-            ll, accepted = kf.update(h_gps, z, R_gps, H_x_gps)
+            ll, accepted, nis, _ = kf.update(h_gps, z, R_gps, H_x_gps)
             gps_log_likelihoods.append(ll)
             gps_ll_times.append(t)
             if not accepted:
@@ -609,7 +609,7 @@ def run_simulation():
 
         if i % ALTIMETER_INTERVAL == 0:
             z = np.array([sim.get_altimeter_reading()])
-            ll, accepted = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
+            ll, accepted, nis, _ = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
             alt_log_likelihoods.append(ll)
             alt_ll_times.append(t)
             if not accepted:
@@ -625,7 +625,7 @@ def run_simulation():
             H_x_magnetometer = np.zeros((3, 16))
             H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
 
-            ll, accepted = kf.update(
+            ll, accepted, nis, _ = kf.update(
                 h_magnetometer, z, R_magnetometer, H_x_magnetometer
             )
             mag_log_likelihoods.append(ll)
