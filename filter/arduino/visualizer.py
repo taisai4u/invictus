@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 import pyvista as pv
@@ -13,6 +13,9 @@ _AXIS_SCREEN_FRACTION = 0.1
 _TRAIL_COLOR = "#ffcc33"
 _ELLIPSOID_COLOR = "cyan"
 _ELLIPSOID_OPACITY = 0.15
+_ORI_COV_COLOR = "orange"
+_ORI_COV_OPACITY = 0.25
+_ARC_NUM_POINTS = 65
 _MAG_COLOR = "magenta"
 _ACCEL_COLOR = "yellow"
 _BG_COLOR = "#1a1a2e"
@@ -21,7 +24,8 @@ _MIN_PARALLEL_SCALE = 0.5  # minimum half-height of viewport in meters (1m x 1m 
 
 
 class NISTracker:
-    def __init__(self, nz: int, alpha: float = 0.05):
+    def __init__(self, name: str, nz: int, alpha: float = 0.05):
+        self.name = name
         self.nz = nz
         self.lower_bound: float = chi2.ppf(alpha / 2, nz)
         self.upper_bound: float = chi2.ppf(1 - alpha / 2, nz)
@@ -29,11 +33,15 @@ class NISTracker:
         self.inconsistent_count: int = 0
         self.nis_sum: float = 0.0
 
-    def record(self, nis: float):
+    def record(self, nis: float, on_inconsistent: Callable | None = None):
         self.total_count += 1
         self.nis_sum += nis
         if not (self.lower_bound <= nis <= self.upper_bound):
             self.inconsistent_count += 1
+            print(
+                f"NIS {self.name} inconsistent: {nis} is not between {self.lower_bound} and {self.upper_bound}"
+            )
+            on_inconsistent() if on_inconsistent is not None else None
 
     @property
     def mean_nis(self) -> float:
@@ -76,6 +84,33 @@ class LiveVisualizer:
             color=_ELLIPSOID_COLOR,
             opacity=_ELLIPSOID_OPACITY,
             style="wireframe",
+        )
+
+        self._ori_cone_source = pv.Cone(
+            center=(0, 0, 0.5),
+            direction=(0, 0, -1),
+            height=1.0,
+            radius=1.0,
+            capping=False,
+            resolution=64,
+        )
+        self._ori_cone_actor = self._plotter.add_mesh(
+            self._ori_cone_source,
+            color=_ORI_COV_COLOR,
+            opacity=_ORI_COV_OPACITY,
+            style="wireframe",
+        )
+
+        arc_points = np.zeros((_ARC_NUM_POINTS, 3))
+        arc_points[:, 0] = 1.0  # will be updated each frame
+        self._yaw_arc_mesh = pv.PolyData(arc_points)
+        self._yaw_arc_mesh.lines = np.hstack(
+            [[_ARC_NUM_POINTS], np.arange(_ARC_NUM_POINTS)]
+        )
+        self._yaw_arc_actor = self._plotter.add_mesh(
+            self._yaw_arc_mesh,
+            color=_ORI_COV_COLOR,
+            line_width=3,
         )
 
         self._mag_actor = self._plotter.add_mesh(
@@ -128,7 +163,9 @@ class LiveVisualizer:
         else:
             self._nis_text_actor.SetText(2, text)
 
-    def update_bias_overlay(self, accel_bias: np.ndarray, gyro_bias: np.ndarray) -> None:
+    def update_bias_overlay(
+        self, accel_bias: np.ndarray, gyro_bias: np.ndarray
+    ) -> None:
         text = (
             f"Accel bias: [{accel_bias[0]:+.4f}, {accel_bias[1]:+.4f}, {accel_bias[2]:+.4f}] m/s²\n"
             f"Gyro bias:  [{gyro_bias[0]:+.5f}, {gyro_bias[1]:+.5f}, {gyro_bias[2]:+.5f}] rad/s"
@@ -159,7 +196,14 @@ class LiveVisualizer:
         self._update_trail(pos)
         self._update_ellipsoid(pos, P[0:3, 0:3])
 
-        hidden_actors = [*self._axis_actors, self._ellipsoid_actor, self._mag_actor, self._accel_actor]
+        hidden_actors = [
+            *self._axis_actors,
+            self._ellipsoid_actor,
+            self._ori_cone_actor,
+            self._yaw_arc_actor,
+            self._mag_actor,
+            self._accel_actor,
+        ]
         for actor in hidden_actors:
             actor.SetVisibility(False)
         self._plotter.reset_camera()
@@ -170,6 +214,9 @@ class LiveVisualizer:
             actor.SetVisibility(True)
 
         scale = self._plotter.camera.parallel_scale * _AXIS_SCREEN_FRACTION
+        self._update_orientation_cone(pos, P[6:9, 6:9], rot, scale)
+        self._update_yaw_arc(pos, P[6:9, 6:9], rot, scale)
+
         xform = np.eye(4)
         xform[:3, :3] = rot * scale
         xform[:3, 3] = pos
@@ -183,7 +230,9 @@ class LiveVisualizer:
         self._mag_actor.user_matrix = mag_xform
 
         accel_xform = np.eye(4)
-        accel_xform[:3, :3] = self._rotation_from_direction(self._accel_direction) * scale
+        accel_xform[:3, :3] = (
+            self._rotation_from_direction(self._accel_direction) * scale
+        )
         accel_xform[:3, 3] = pos
         self._accel_actor.user_matrix = accel_xform
 
@@ -199,11 +248,16 @@ class LiveVisualizer:
         cos_angle = np.dot(source, d)
         if sin_angle < 1e-8:
             return np.eye(3) if cos_angle > 0 else np.diag([-1.0, -1.0, 1.0])
-        K = np.array([
-            [0, -cross[2], cross[1]],
-            [cross[2], 0, -cross[0]],
-            [-cross[1], cross[0], 0],
-        ]) / sin_angle
+        K = (
+            np.array(
+                [
+                    [0, -cross[2], cross[1]],
+                    [cross[2], 0, -cross[0]],
+                    [-cross[1], cross[0], 0],
+                ]
+            )
+            / sin_angle
+        )
         return np.eye(3) + sin_angle * K + (1 - cos_angle) * K @ K
 
     def _update_trail(self, pos: np.ndarray) -> None:
@@ -223,6 +277,37 @@ class LiveVisualizer:
             self._trail_actor = self._plotter.add_mesh(
                 self._trail_mesh, color=_TRAIL_COLOR, line_width=2
             )
+
+    def _update_orientation_cone(
+        self, pos: np.ndarray, P_ori: np.ndarray, rot: np.ndarray, scale: float
+    ) -> None:
+        eigvals, eigvecs_2d = np.linalg.eigh(P_ori[0:2, 0:2])
+        half_angles = 2 * np.sqrt(np.maximum(eigvals, 0))
+
+        eigvecs_3d = np.eye(3)
+        eigvecs_3d[0:2, 0:2] = eigvecs_2d
+
+        xform = np.eye(4)
+        xform[:3, :3] = (
+            rot @ eigvecs_3d @ np.diag([half_angles[0], half_angles[1], 1.0]) * scale
+        )
+        xform[:3, 3] = pos
+        self._ori_cone_actor.user_matrix = xform
+
+    def _update_yaw_arc(
+        self, pos: np.ndarray, P_ori: np.ndarray, rot: np.ndarray, scale: float
+    ) -> None:
+        yaw_sigma = 2 * np.sqrt(max(P_ori[2, 2], 0))
+        yaw_sigma = min(yaw_sigma, np.pi)
+
+        theta = np.linspace(-yaw_sigma, yaw_sigma, _ARC_NUM_POINTS)
+        points = np.column_stack([np.cos(theta), np.sin(theta), np.ones_like(theta)])
+        self._yaw_arc_mesh.points = points
+
+        xform = np.eye(4)
+        xform[:3, :3] = rot * scale
+        xform[:3, 3] = pos
+        self._yaw_arc_actor.user_matrix = xform
 
     def _update_ellipsoid(self, pos: np.ndarray, P_pos: np.ndarray) -> None:
         eigvals, eigvecs = np.linalg.eigh(P_pos)

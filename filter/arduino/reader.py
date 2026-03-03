@@ -57,8 +57,8 @@ SIGMA_BAROMETER = 4.91566  # barometer noise [Pa]
 # SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
 SIGMA_MAGNETOMETER = 3.0182126667  # experimentally determined
 
-MAG_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
-ACCEL_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
+MAG_UPDATE_INTERVAL_US = 1.5 * 1e6  # 0.1 seconds
+ACCEL_UPDATE_INTERVAL_US = 1.5 * 1e6  # 0.1 seconds
 
 SEA_LEVEL_PRESSURE = 101325.0
 CALIBRATION_DURATION_US = 5 * 1e6  # 5 seconds
@@ -153,7 +153,7 @@ def is_imu_static(
     static_gyro_ln_magnitude_mean: float,
     static_gyro_ln_magnitude_var: float,
 ) -> bool:
-    criterion_a1 = np.abs(np.linalg.norm(a_m) - np.linalg.norm(g)) < 0.2
+    criterion_a1 = np.abs(np.linalg.norm(a_m) - np.linalg.norm(g)) < 0.1
     x = np.log(np.linalg.norm(w_m) + 0.00001)
     D2 = (x - static_gyro_ln_magnitude_mean) ** 2 / static_gyro_ln_magnitude_var
     criterion_a2 = D2 < chi2.ppf(0.997, 1)
@@ -303,10 +303,10 @@ def main():
     viz.process_events()
 
     nis_trackers = {
-        "Mag": NISTracker(nz=2),
-        "Accel": NISTracker(nz=3),
-        "Baro": NISTracker(nz=1),
-        "ZUPT": NISTracker(nz=3),
+        "Mag": NISTracker(name="Mag", nz=2),
+        "Accel": NISTracker(name="Accel", nz=3),
+        "Baro": NISTracker(name="Baro", nz=1),
+        "ZUPT": NISTracker(name="ZUPT", nz=3),
     }
     innovations: dict[str, list[np.ndarray]] = {
         "Mag": [],
@@ -366,22 +366,6 @@ def main():
                     last_m_m_norm = (
                         np.linalg.norm(last_m_m) if last_m_m is not None else 0
                     )
-                    if imu_static:
-                        # ZUPT (zero-velocity update)
-                        # since we've detected that the IMU is static,
-                        # we create a synthetic "measurement" of velocity that's set to zero
-                        # so the filter will update toward zero velocity
-                        z = np.zeros(3)
-                        H_x_zupt = np.zeros((3, 16))
-                        H_x_zupt[0:3, 3:6] = np.eye(3)
-                        diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
-                        R_zupt = np.eye(3) * 0.0000068493
-                        ll, accepted, nis, innovation = kf.update(
-                            h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
-                        )
-                        if accepted:
-                            nis_trackers["ZUPT"].record(nis)
-                            innovations["ZUPT"].append(innovation)
                     if (
                         t - last_mag_update_timestamp_us > MAG_UPDATE_INTERVAL_US
                         and mag_norm > 0
@@ -393,7 +377,7 @@ def main():
                         H_x_magnetometer = np.zeros((3, 16))
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
                         R_magnetometer_normalized = (
-                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2
+                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2 * 3.5**2
                         )
 
                         mag_interference_absent = is_mag_interference_absent(
@@ -413,14 +397,19 @@ def main():
                                 z,
                                 R_magnetometer_normalized,
                                 H_x_magnetometer,
-                                gating_threshold=0.997,
                                 dof=2,
                             )
                             if not accepted:
+                                ori_std_deg = np.degrees(
+                                    np.sqrt(np.diag(kf.f.P[6:9, 6:9]))
+                                )
                                 print(
                                     f"Magnetometer measurement rejected at t={t}us",
                                 )
                                 print(f"measurement: {m}")
+                                print(
+                                    f"  orientation 1σ: [{ori_std_deg[0]:.4f}, {ori_std_deg[1]:.4f}, {ori_std_deg[2]:.4f}] deg"
+                                )
                             else:
                                 last_mag_update_timestamp_us = t
                                 nis_trackers["Mag"].record(nis)
@@ -430,24 +419,54 @@ def main():
                             # print(f"Magnetometer interference present at t={t}us")
                     if t - last_accel_update_timestamp_us > ACCEL_UPDATE_INTERVAL_US:
                         if imu_static:
+                            # ZUPT (zero-velocity update)
+                            # since we've detected that the IMU is static,
+                            # we create a synthetic "measurement" of velocity that's set to zero
+                            # so the filter will update toward zero velocity
+                            z = np.zeros(3)
+                            H_x_zupt = np.zeros((3, 16))
+                            H_x_zupt[0:3, 3:6] = np.eye(3)
+                            diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
+                            R_zupt = np.eye(3) * (diff) ** 2
+                            ll, accepted, nis, innovation = kf.update(
+                                h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
+                            )
+                            if accepted:
+                                nis_trackers["ZUPT"].record(nis)
+                                innovations["ZUPT"].append(innovation)
+
                             z = a
                             H_x_accel = np.zeros((3, 16))
                             H_x_accel[0:3, 6:10] = kf.get_inverse_rotation_H_x(-G)
                             H_x_accel[0:3, 10:13] = np.eye(3)
-                            R_accel = np.eye(3) * SIGMA_ACCEL_NOISE**2
+                            diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
+                            R_accel = (
+                                np.eye(3) * (SIGMA_ACCEL_NOISE * 1.5) ** 2
+                                + 4 * (1 / 0.1 * diff**2) ** 2
+                            )
                             ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
                                 z,
                                 R_accel,
                                 H_x_accel,
-                                gating_threshold=0.997,
                             )
 
                             if not accepted:
+                                ori_std_deg = np.degrees(
+                                    np.sqrt(np.diag(kf.f.P[6:9, 6:9]))
+                                )
                                 print(f"Accelerometer measurement rejected at t={t}us")
+                                print(
+                                    f"  orientation 1σ: [{ori_std_deg[0]:.4f}, {ori_std_deg[1]:.4f}, {ori_std_deg[2]:.4f}] deg"
+                                )
                             else:
                                 last_accel_update_timestamp_us = t
-                                nis_trackers["Accel"].record(nis)
+                                nis_trackers["Accel"].record(
+                                    nis,
+                                    on_inconsistent=lambda: kf.compare_prediction_with_measurement(
+                                        R_accel, H_x_accel
+                                    ),
+                                )
                                 innovations["Accel"].append(innovation)
 
                     if t - last_viz_update_timestamp_us > 1 / 30 * 1e6:
@@ -475,7 +494,6 @@ def main():
                         np.array([p]),
                         R_barometer,
                         H_x_barometer,
-                        # gating_threshold=1,
                     )
                     if not accepted:
                         print(

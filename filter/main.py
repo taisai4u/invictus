@@ -105,7 +105,13 @@ class FlightFilter:
         )
         return H
 
+    def compare_prediction_with_measurement(self, R, H_x):
+        H = H_x @ self.get_X_dx()
+        print(f"H @ P @ H.T: {H @ self.f.P @ H.T}")
+        print(f"R: {R}")
+
     def update(self, h, z, R, H_x, gating_threshold=0.997, dof=None):
+        # return 0, True, 0, np.zeros(3)
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
@@ -128,6 +134,8 @@ class FlightFilter:
             print(
                 f"Rejected measurement with D2 = {D2}, DOF={k}, Threshold = {chi2_threshold}."
             )
+            print(f"H @ P @ H.T: {H @ self.f.P @ H.T}")
+            print(f"R: {R}")
             print(f"z: {z}, h(x_nom): {h(self.x_nom)}")
             return log_likelihood, False, D2, y
 
