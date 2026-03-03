@@ -57,8 +57,8 @@ SIGMA_BAROMETER = 4.91566  # barometer noise [Pa]
 # SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
 SIGMA_MAGNETOMETER = 3.0182126667  # experimentally determined
 
-MAG_UPDATE_INTERVAL_US = 1.5 * 1e6  # 0.1 seconds
-ACCEL_UPDATE_INTERVAL_US = 1.5 * 1e6  # 0.1 seconds
+MAG_UPDATE_INTERVAL_US = 0.5 * 1e6  # 0.1 seconds
+ACCEL_UPDATE_INTERVAL_US = 0.5 * 1e6  # 0.1 seconds
 
 SEA_LEVEL_PRESSURE = 101325.0
 CALIBRATION_DURATION_US = 5 * 1e6  # 5 seconds
@@ -377,7 +377,7 @@ def main():
                         H_x_magnetometer = np.zeros((3, 16))
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
                         R_magnetometer_normalized = (
-                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2 * 3.5**2
+                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2 * 0.3**2
                         )
 
                         mag_interference_absent = is_mag_interference_absent(
@@ -427,7 +427,7 @@ def main():
                             H_x_zupt = np.zeros((3, 16))
                             H_x_zupt[0:3, 3:6] = np.eye(3)
                             diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
-                            R_zupt = np.eye(3) * (diff) ** 2
+                            R_zupt = np.eye(3) * 0.0005**2 + (0 * 2 * diff * dt) ** 2
                             ll, accepted, nis, innovation = kf.update(
                                 h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
                             )
@@ -441,8 +441,8 @@ def main():
                             H_x_accel[0:3, 10:13] = np.eye(3)
                             diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
                             R_accel = (
-                                np.eye(3) * (SIGMA_ACCEL_NOISE * 1.5) ** 2
-                                + 4 * (1 / 0.1 * diff**2) ** 2
+                                np.eye(3) * (SIGMA_ACCEL_NOISE * 0.65) ** 2
+                                + (0 * 1 * diff) ** 2
                             )
                             ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
