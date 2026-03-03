@@ -105,13 +105,13 @@ class FlightFilter:
         )
         return H
 
-    def update(self, h, z, R, H_x, gating_threshold=0.997):
+    def update(self, h, z, R, H_x, gating_threshold=0.997, dof=None):
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
 
         # dof of the measurement
-        k = len(y)
+        k = dof if dof is not None else len(y)
 
         K = self.f.P @ H.T @ np.linalg.inv(S)
         log_likelihood = -0.5 * (

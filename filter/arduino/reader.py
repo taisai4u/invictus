@@ -43,19 +43,19 @@ NORTH = np.array(
 # SIGMA_ACCEL_NOISE = (
 #     150 * 9.81 * 1e-6 * np.sqrt(100 * 1.57)
 # )  # accelerometer white noise [m/s^2]
-SIGMA_ACCEL_NOISE = 0.025  # experimentally determined
+SIGMA_ACCEL_NOISE = 0.0164186667  # experimentally determined
 # SIGMA_GYRO_NOISE = (
 #     0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
 # )  # 0.014 deg / s / sqrt(Hz)
-SIGMA_GYRO_NOISE = 0.0026  # experimentally determined
+SIGMA_GYRO_NOISE = 0.001726  # experimentally determined
 SIGMA_ACCEL_WALK = 0.0001  # accelerometer bias random walk [m/s^2/√s] (estimate)
 SIGMA_GYRO_WALK = 0.0001  # gyroscope bias random walk [rad/s/√s] (estimate)
 
 # --- Sensor noise for observation models ---
 SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
-SIGMA_BAROMETER = 3.812  # barometer noise [Pa]
+SIGMA_BAROMETER = 4.91566  # barometer noise [Pa]
 # SIGMA_MAGNETOMETER = 1.0  # magnetometer noise [uT]
-SIGMA_MAGNETOMETER = 3.911  # experimentally determined
+SIGMA_MAGNETOMETER = 3.0182126667  # experimentally determined
 
 MAG_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
 ACCEL_UPDATE_INTERVAL_US = 0.1 * 1e6  # 0.1 seconds
@@ -252,7 +252,6 @@ def main():
         return SEA_LEVEL_PRESSURE * ratio ** (1 / 0.1903)
 
     R_barometer = np.array([[SIGMA_BAROMETER**2]])
-    R_barometer = np.array([[6.6364]])
 
     def h_magnetometer(x_nom):
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
@@ -263,7 +262,7 @@ def main():
         g_body = world_orientation.inv().apply(-G)
         a_b = x_nom[10:13]
         predicted = g_body + a_b
-        return predicted / np.linalg.norm(predicted)
+        return predicted
 
     def h_velocity(x_nom):
         return x_nom[3:6]
@@ -304,7 +303,7 @@ def main():
     viz.process_events()
 
     nis_trackers = {
-        "Mag": NISTracker(nz=3),
+        "Mag": NISTracker(nz=2),
         "Accel": NISTracker(nz=3),
         "Baro": NISTracker(nz=1),
         "ZUPT": NISTracker(nz=3),
@@ -318,7 +317,7 @@ def main():
 
     R_VARIABLE_NAMES = {
         "Mag": "R_magnetometer_normalized",
-        "Accel": "R_accel_normalized",
+        "Accel": "R_accel",
         "Baro": "R_barometer",
         "ZUPT": "R_zupt",
     }
@@ -376,13 +375,7 @@ def main():
                         H_x_zupt = np.zeros((3, 16))
                         H_x_zupt[0:3, 3:6] = np.eye(3)
                         diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
-                        R_zupt = np.array(
-                            [
-                                [1.131e-05, -5.442e-06, -1.518e-06],
-                                [-5.442e-06, 8.847e-06, -9.585e-07],
-                                [-1.518e-06, -9.585e-07, 3.959e-06],
-                            ]
-                        )
+                        R_zupt = np.eye(3) * 0.0000068493
                         ll, accepted, nis, innovation = kf.update(
                             h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
                         )
@@ -399,11 +392,9 @@ def main():
 
                         H_x_magnetometer = np.zeros((3, 16))
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
-                        N = normalization_jacobian(m)
                         R_magnetometer_normalized = (
-                            N @ (np.eye(3) * SIGMA_MAGNETOMETER**2) @ N.T
+                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2
                         )
-                        R_magnetometer_normalized = np.eye(3) * 0.00225
 
                         mag_interference_absent = is_mag_interference_absent(
                             a,
@@ -423,6 +414,7 @@ def main():
                                 R_magnetometer_normalized,
                                 H_x_magnetometer,
                                 gating_threshold=0.997,
+                                dof=2,
                             )
                             if not accepted:
                                 print(
@@ -438,36 +430,21 @@ def main():
                             # print(f"Magnetometer interference present at t={t}us")
                     if t - last_accel_update_timestamp_us > ACCEL_UPDATE_INTERVAL_US:
                         if imu_static:
-                            z = a / np.linalg.norm(a)
-
-                            world_orientation = Rotation.from_quat(
-                                kf.x_nom[6:10], scalar_first=True
-                            )
-                            raw_pred = (
-                                world_orientation.inv().apply(-G) + kf.x_nom[10:13]
-                            )
-                            N_pred = normalization_jacobian(raw_pred)
+                            z = a
                             H_x_accel = np.zeros((3, 16))
-                            H_x_accel[0:3, 6:10] = N_pred @ kf.get_inverse_rotation_H_x(
-                                -G
-                            )
-                            H_x_accel[0:3, 10:13] = N_pred @ np.eye(3)
-                            N = normalization_jacobian(a)
-                            R_accel_normalized = (
-                                N @ (np.eye(3) * SIGMA_ACCEL_NOISE**2) @ N.T
-                            )
-                            R_accel_normalized = np.eye(3) * 0.0000083523
+                            H_x_accel[0:3, 6:10] = kf.get_inverse_rotation_H_x(-G)
+                            H_x_accel[0:3, 10:13] = np.eye(3)
+                            R_accel = np.eye(3) * SIGMA_ACCEL_NOISE**2
                             ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
                                 z,
-                                R_accel_normalized,
+                                R_accel,
                                 H_x_accel,
                                 gating_threshold=0.997,
                             )
 
                             if not accepted:
                                 print(f"Accelerometer measurement rejected at t={t}us")
-                                print(f"R_accel_normalized: {R_accel_normalized}")
                             else:
                                 last_accel_update_timestamp_us = t
                                 nis_trackers["Accel"].record(nis)
