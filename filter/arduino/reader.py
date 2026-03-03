@@ -216,6 +216,31 @@ def normalization_jacobian(a: np.ndarray) -> np.ndarray:
     return (np.eye(3) - np.outer(a, a) / a_norm**2) / a_norm
 
 
+class AdaptiveR:
+    def __init__(self, R: np.ndarray, min_samples: int = 50):
+        self.R = R.copy()
+        self.min_samples = min_samples
+        self._yy_sum = np.zeros_like(R)
+        self._hpht_sum = np.zeros_like(R)
+        self._n = 0
+
+    def record(self, innovation: np.ndarray, hpht: np.ndarray):
+        self._yy_sum += np.outer(innovation, innovation)
+        self._hpht_sum += hpht
+        self._n += 1
+
+    def adapt(self):
+        if self._n < self.min_samples:
+            return
+        R_new = self._yy_sum / self._n - self._hpht_sum / self._n
+        eigvals, eigvecs = np.linalg.eigh(R_new)
+        eigvals = np.maximum(eigvals, 1e-15)
+        self.R = eigvecs @ np.diag(eigvals) @ eigvecs.T
+        self._yy_sum = np.zeros_like(self.R)
+        self._hpht_sum = np.zeros_like(self.R)
+        self._n = 0
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <serial_port> [baud]")
@@ -251,8 +276,41 @@ def main():
         ratio = max(1 - x_nom[2] / 44330, 1e-12)
         return SEA_LEVEL_PRESSURE * ratio ** (1 / 0.1903)
 
-    R_barometer = np.array([[SIGMA_BAROMETER**2]])
-    R_barometer = np.array([[6.6364]])
+    # R_barometer = np.array([[SIGMA_BAROMETER**2]])
+    # R_barometer = np.array([[6.6364]])
+
+    R_ADAPT_INTERVAL_US = 30 * 1e6  # 30 seconds
+    adaptive_Rs = {
+        "ZUPT": AdaptiveR(
+            np.array(
+                [
+                    [1.000e-15, 5.975e-32, -1.060e-32],
+                    [1.926e-32, 1.000e-15, -6.153e-32],
+                    [0.000e00, -9.861e-32, 1.000e-15],
+                ]
+            )
+        ),
+        "Mag": AdaptiveR(
+            np.array(
+                [
+                    [2.713e-03, -2.259e-04, -2.290e-04],
+                    [-2.259e-04, 1.662e-04, 2.027e-05],
+                    [-2.290e-04, 2.027e-05, 1.946e-05],
+                ]
+            )
+        ),
+        "Accel": AdaptiveR(
+            np.array(
+                [
+                    [1.554e-06, -6.634e-07, 4.738e-08],
+                    [-6.634e-07, 2.731e-06, -7.760e-07],
+                    [4.738e-08, -7.760e-07, 2.348e-07],
+                ]
+            )
+        ),
+        "Baro": AdaptiveR(np.array([[4.424]])),
+    }
+    last_R_adapt_timestamp_us = 0
 
     def h_magnetometer(x_nom):
         world_orientation = Rotation.from_quat(x_nom[6:10], scalar_first=True)
@@ -336,6 +394,12 @@ def main():
             print(
                 f"{var_name} = np.array({np.array2string(np.atleast_2d(cov), separator=', ')})"
             )
+        print("\n--- Current Adaptive R values ---")
+        for name, ar in adaptive_Rs.items():
+            var_name = R_VARIABLE_NAMES[name]
+            print(
+                f"{var_name} = np.array({np.array2string(np.atleast_2d(ar.R), separator=', ')})"
+            )
 
     def handle_exit(sig, frame):
         print_innovation_covariances()
@@ -354,7 +418,6 @@ def main():
                 elif kf:
                     dt = (t - last_imu_timestamp_us) / 1e6
                     u = np.concatenate((a, w))
-                    # print(f"Predicting with u={u}")
                     kf.predict(u, dt)
                     imu_static = is_imu_static(
                         a,
@@ -369,24 +432,27 @@ def main():
                     )
                     if imu_static:
                         # ZUPT (zero-velocity update)
-                        # since we've detected that the IMU is static,
-                        # we create a synthetic "measurement" of velocity that's set to zero
-                        # so the filter will update toward zero velocity
                         z = np.zeros(3)
                         H_x_zupt = np.zeros((3, 16))
                         H_x_zupt[0:3, 3:6] = np.eye(3)
-                        diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
-                        R_zupt = np.array(
-                            [
-                                [1.131e-05, -5.442e-06, -1.518e-06],
-                                [-5.442e-06, 8.847e-06, -9.585e-07],
-                                [-1.518e-06, -9.585e-07, 3.959e-06],
-                            ]
-                        )
+                        # R_zupt = np.array(
+                        #     [
+                        #         [1.131e-05, -5.442e-06, -1.518e-06],
+                        #         [-5.442e-06, 8.847e-06, -9.585e-07],
+                        #         [-1.518e-06, -9.585e-07, 3.959e-06],
+                        #     ]
+                        # )
+                        H_zupt = H_x_zupt @ kf.get_X_dx()
+                        hpht_zupt = H_zupt @ kf.f.P @ H_zupt.T
                         ll, accepted, nis, innovation = kf.update(
-                            h_velocity, z, R_zupt, H_x_zupt, gating_threshold=1
+                            h_velocity,
+                            z,
+                            adaptive_Rs["ZUPT"].R,
+                            H_x_zupt,
+                            gating_threshold=1,
                         )
                         if accepted:
+                            adaptive_Rs["ZUPT"].record(innovation, hpht_zupt)
                             nis_trackers["ZUPT"].record(nis)
                             innovations["ZUPT"].append(innovation)
                     if (
@@ -399,11 +465,11 @@ def main():
 
                         H_x_magnetometer = np.zeros((3, 16))
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
-                        N = normalization_jacobian(m)
-                        R_magnetometer_normalized = (
-                            N @ (np.eye(3) * SIGMA_MAGNETOMETER**2) @ N.T
-                        )
-                        R_magnetometer_normalized = np.eye(3) * 0.00225
+                        # N = normalization_jacobian(m)
+                        # R_magnetometer_normalized = (
+                        #     N @ (np.eye(3) * SIGMA_MAGNETOMETER**2) @ N.T
+                        # )
+                        # R_magnetometer_normalized = np.eye(3) * 0.00225
 
                         mag_interference_absent = is_mag_interference_absent(
                             a,
@@ -417,12 +483,14 @@ def main():
                             kf.x_nom,
                         )
                         if mag_interference_absent:
+                            H_mag = H_x_magnetometer @ kf.get_X_dx()
+                            hpht_mag = H_mag @ kf.f.P @ H_mag.T
                             ll, accepted, nis, innovation = kf.update(
                                 h_magnetometer,
                                 z,
-                                R_magnetometer_normalized,
+                                adaptive_Rs["Mag"].R,
                                 H_x_magnetometer,
-                                gating_threshold=0.997,
+                                gating_threshold=1,
                             )
                             if not accepted:
                                 print(
@@ -430,12 +498,12 @@ def main():
                                 )
                                 print(f"measurement: {m}")
                             else:
+                                adaptive_Rs["Mag"].record(innovation, hpht_mag)
                                 last_mag_update_timestamp_us = t
                                 nis_trackers["Mag"].record(nis)
                                 innovations["Mag"].append(innovation)
                         else:
                             pass
-                            # print(f"Magnetometer interference present at t={t}us")
                     if t - last_accel_update_timestamp_us > ACCEL_UPDATE_INTERVAL_US:
                         if imu_static:
                             z = a / np.linalg.norm(a)
@@ -452,26 +520,37 @@ def main():
                                 -G
                             )
                             H_x_accel[0:3, 10:13] = N_pred @ np.eye(3)
-                            N = normalization_jacobian(a)
-                            R_accel_normalized = (
-                                N @ (np.eye(3) * SIGMA_ACCEL_NOISE**2) @ N.T
-                            )
-                            R_accel_normalized = np.eye(3) * 0.0000083523
+                            # N = normalization_jacobian(a)
+                            # R_accel_normalized = (
+                            #     N @ (np.eye(3) * SIGMA_ACCEL_NOISE**2) @ N.T
+                            # )
+                            # R_accel_normalized = np.eye(3) * 0.0000083523
+                            H_accel = H_x_accel @ kf.get_X_dx()
+                            hpht_accel = H_accel @ kf.f.P @ H_accel.T
                             ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
                                 z,
-                                R_accel_normalized,
+                                adaptive_Rs["Accel"].R,
                                 H_x_accel,
-                                gating_threshold=0.997,
+                                gating_threshold=1,
                             )
 
                             if not accepted:
                                 print(f"Accelerometer measurement rejected at t={t}us")
-                                print(f"R_accel_normalized: {R_accel_normalized}")
                             else:
+                                adaptive_Rs["Accel"].record(innovation, hpht_accel)
                                 last_accel_update_timestamp_us = t
                                 nis_trackers["Accel"].record(nis)
                                 innovations["Accel"].append(innovation)
+
+                    # adapt R every 30 seconds
+                    if t - last_R_adapt_timestamp_us > R_ADAPT_INTERVAL_US:
+                        for name, ar in adaptive_Rs.items():
+                            ar.adapt()
+                        last_R_adapt_timestamp_us = t
+                        print("Adapted R values:")
+                        for name, ar in adaptive_Rs.items():
+                            print(f"  {name}: diag={np.diag(ar.R)}")
 
                     if t - last_viz_update_timestamp_us > 1 / 30 * 1e6:
                         viz.update_measurements(a, m)
@@ -493,12 +572,14 @@ def main():
                     H_x_barometer[0, 2] = (
                         -1000 * SEA_LEVEL_PRESSURE * ratio ** (8097 / 1903) / 8435999
                     )
+                    H_baro = H_x_barometer @ kf.get_X_dx()
+                    hpht_baro = H_baro @ kf.f.P @ H_baro.T
                     ll, accepted, nis, innovation = kf.update(
                         h_barometer,
                         np.array([p]),
-                        R_barometer,
+                        adaptive_Rs["Baro"].R,
                         H_x_barometer,
-                        # gating_threshold=1,
+                        gating_threshold=1,
                     )
                     if not accepted:
                         print(
@@ -513,6 +594,7 @@ def main():
             ) ** 2}"""
                         )
                     else:
+                        adaptive_Rs["Baro"].record(innovation, hpht_baro)
                         nis_trackers["Baro"].record(nis)
                         innovations["Baro"].append(innovation)
 
