@@ -48,8 +48,10 @@ SIGMA_ACCEL_NOISE = 0.0164186667  # experimentally determined
 #     0.014 * np.pi / 180.0 * np.sqrt(100 * 1.57)
 # )  # 0.014 deg / s / sqrt(Hz)
 SIGMA_GYRO_NOISE = 0.001726  # experimentally determined
-SIGMA_ACCEL_WALK = 0.0001  # accelerometer bias random walk [m/s^2/√s] (estimate)
-SIGMA_GYRO_WALK = 0.0001  # gyroscope bias random walk [rad/s/√s] (estimate)
+SIGMA_ACCEL_WALK = (
+    0.0000142741  # accelerometer bias random walk [m/s^2/√s] (allan variance)
+)
+SIGMA_GYRO_WALK = 4.2354e-7  # gyroscope bias random walk [rad/s/√s] (allan variance)
 
 # --- Sensor noise for observation models ---
 SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
@@ -441,7 +443,7 @@ def main():
                             H_x_accel[0:3, 10:13] = np.eye(3)
                             diff = np.abs(np.linalg.norm(a) - np.linalg.norm(G))
                             R_accel = np.eye(3) * (
-                                (SIGMA_ACCEL_NOISE * 1.25) ** 2 + (0 * 3 * diff) ** 2
+                                (SIGMA_ACCEL_NOISE) ** 2 + (0 * 3 * diff) ** 2
                             )
                             ll, accepted, nis, innovation = kf.update(
                                 h_accelerometer,
