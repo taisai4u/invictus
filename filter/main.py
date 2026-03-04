@@ -110,7 +110,7 @@ class FlightFilter:
         print(f"H @ P @ H.T: {H @ self.f.P @ H.T}")
         print(f"R: {R}")
 
-    def update(self, h, z, R, H_x, gating_threshold=0.997, dof=None):
+    def update(self, h, z, R, H_x, gating_threshold=1.997, dof=None):
         # return 0, True, 0, np.zeros(3)
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
