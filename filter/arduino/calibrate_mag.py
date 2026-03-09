@@ -7,25 +7,27 @@ import serial
 from .reader import read_packets, ImuReading
 
 
-def collect_mag_samples(port_name: str, baud: int, n_samples: int) -> np.ndarray:
+def collect_mag_samples(port_name: str, baud: int) -> np.ndarray:
     port = serial.Serial(port_name, baud)
     time.sleep(2)
     port.reset_input_buffer()
     print(f"Connected to {port_name} @ {baud} baud.")
     print(f"Slowly rotate the sensor through all orientations.")
-    print(f"Collecting {n_samples} magnetometer samples...\n")
+    print(f"Press Ctrl+C when done.\n")
 
     samples = []
-    for reading in read_packets(port):
-        if not isinstance(reading, ImuReading):
-            continue
-        samples.append(reading.mag.copy())
-        if len(samples) % 100 == 0:
-            print(f"  {len(samples)}/{n_samples} samples collected")
-        if len(samples) >= n_samples:
-            break
+    try:
+        for reading in read_packets(port):
+            if not isinstance(reading, ImuReading):
+                continue
+            samples.append(reading.mag.copy())
+            if len(samples) % 100 == 0:
+                print(f"  {len(samples)} samples collected")
+    except KeyboardInterrupt:
+        pass
 
     port.close()
+    print(f"\nCollected {len(samples)} samples total.")
     return np.array(samples)
 
 
@@ -49,14 +51,13 @@ def fit_sphere(samples: np.ndarray) -> tuple[np.ndarray, float]:
 
 def main():
     if len(sys.argv) < 2:
-        print(f"Usage: python -m filter.arduino.calibrate_mag <serial_port> [baud] [n_samples]")
+        print(f"Usage: python -m filter.arduino.calibrate_mag <serial_port> [baud]")
         sys.exit(1)
 
     port_name = sys.argv[1]
     baud = int(sys.argv[2]) if len(sys.argv) > 2 else 115200
-    n_samples = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
 
-    samples = collect_mag_samples(port_name, baud, n_samples)
+    samples = collect_mag_samples(port_name, baud)
 
     hard_iron_offset, radius = fit_sphere(samples)
 

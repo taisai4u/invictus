@@ -64,6 +64,7 @@ ACCEL_UPDATE_INTERVAL_US = 0.05 * 1e6  # 0.1 seconds
 
 SEA_LEVEL_PRESSURE = 101325.0
 CALIBRATION_DURATION_US = 5 * 1e6  # 5 seconds
+HARD_IRON_OFFSET = np.array([1.097636, 1.077313, -1.796130])
 
 
 @dataclass
@@ -349,6 +350,7 @@ def main():
     for reading in read_packets(port):
         match reading:
             case ImuReading(timestamp_us=t, accel=a, gyro=w, mag=m):
+                m = m - HARD_IRON_OFFSET
                 if not first_imu_reading:
                     first_imu_reading = reading
                     print(f"First IMU reading at t={t}us")
@@ -379,7 +381,7 @@ def main():
                         H_x_magnetometer = np.zeros((3, 16))
                         H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
                         R_magnetometer_normalized = (
-                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2 * 1**2
+                            np.eye(3) * SIGMA_MAGNETOMETER**2 / mag_norm**2
                         )
 
                         mag_interference_absent = is_mag_interference_absent(
