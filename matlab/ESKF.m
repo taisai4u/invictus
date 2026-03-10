@@ -58,7 +58,7 @@ classdef ESKF
             F_x(4:6,7:9) = -R * ESKF.skew(a_m - a_b) .* dt;
             F_x(4:6,10:12) = -R .* dt;
 
-            F_x(7:9, 7:9) = quaternion((w_m-w_b)' .* dt, 'rotvec').rotmat("point")';
+            F_x(7:9, 7:9) = quaternion((w_m-w_b).' .* dt, 'rotvec').rotmat("point").';
             F_x(7:9, 13:15) = -eye(3) .* dt;
         end
 
@@ -78,7 +78,7 @@ classdef ESKF
             % update error-state covariance
             F_x = obj.get_F_x(u, dt);
             F_i = [zeros(3,12); eye(12)];
-            obj.P = F_x * obj.P * F_x' + F_i * Q_i * F_i';
+            obj.P = F_x * obj.P * F_x.' + F_i * Q_i * F_i.';
 
             % update nominal state
             R = obj.get_rotation_matrix();
@@ -91,7 +91,7 @@ classdef ESKF
             [p, v, q] = deal(obj.x_nom(1:3), obj.x_nom(4:6), obj.get_quat());
             obj.x_nom(1:3) = p + v .* dt + 0.5 * (R*(a_m-a_b) + obj.g) .* dt.^2;
             obj.x_nom(4:6) = v + (R*(a_m-a_b) + obj.g) .* dt;
-            obj.x_nom(7:10) = compact(q * quaternion((w_m-w_b)' .* dt, 'rotvec'))';
+            obj.x_nom(7:10) = compact(q * quaternion((w_m-w_b).' .* dt, 'rotvec')).';
         end
 
         function X_dx = get_X_dx(obj)
@@ -114,7 +114,7 @@ classdef ESKF
             [q0, p] = deal(obj.x_nom(7), obj.x_nom(8:10));
             H = zeros(3, 4);
             H(1:3,1) = 2 .* (q0 .* vec + cross(vec, p));
-            H(1:3,2:4) = 2 .* (p'*vec .* eye(3) + p*vec' - vec*p' + q0 .* ESKF.skew(vec));
+            H(1:3,2:4) = 2 .* (p.'*vec .* eye(3) + p*vec.' - vec*p.' + q0 .* ESKF.skew(vec));
         end
 
         function obj = update(obj, pred, z, R, H_x)
@@ -127,23 +127,23 @@ classdef ESKF
             end
             H = H_x * obj.get_X_dx();
             y = z - pred;
-            S = H * obj.P * H' + R;
-            K = obj.P * H' / S;
+            S = H * obj.P * H.' + R;
+            K = obj.P * H.' / S;
 
             % update error state
             x = K * y;
             A = eye(15) - K * H;
-            obj.P = A*obj.P*A' + K*R*K';
+            obj.P = A*obj.P*A.' + K*R*K.';
 
             % inject error state into nominal state
             obj.x_nom(1:6) = obj.x_nom(1:6) + x(1:6);
-            obj.x_nom(7:10) = compact(obj.get_quat() * quaternion(x(7:9)', 'rotvec'))';
+            obj.x_nom(7:10) = compact(obj.get_quat() * quaternion(x(7:9).', 'rotvec')).';
             obj.x_nom(11:16) = obj.x_nom(11:16) + x(10:15);
 
             % reset error state to 0, adjust P to account for injection
             G = eye(15);
             G(7:9,7:9) = eye(3) - ESKF.skew(0.5 .* x(7:9));
-            obj.P = G*obj.P*G';
+            obj.P = G*obj.P*G.';
         end
 
         function [pos, quat] = pose(obj)
