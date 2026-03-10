@@ -140,3 +140,5 @@ disp("Train: " + autoTunedRMSErrorTrain);
 disp("Test: " + autoTunedRMSErrorTest);
 
 % you can see that the optimizer generalized pretty well
+
+insfilterErrorState

@@ -14,12 +14,7 @@ imuSamplesPerGPS = (imuFs/gpsFs);
 assert(imuSamplesPerGPS == fix(imuSamplesPerGPS), ...
     'GPS sampling rate must be an integer factor of IMU sampling rate.');
 
-%% fusion filter
-fusionfilt = insfilterMARG;
-fusionfilt.IMUSampleRate = imuFs;
-fusionfilt.ReferenceLocation = refloc;
-
-%% uav trajectory
+% uav trajectory
 load LoggedQuadcopter.mat trajData;
 trajOrient = trajData.Orientation;
 trajVel = trajData.Velocity;
@@ -29,7 +24,7 @@ trajAngVel = trajData.AngularVelocity;
 
 rng(1);
 
-%% simulate GPS
+% simulate GPS
 gps = gpsSensor('UpdateRate', gpsFs);
 gps.ReferenceLocation = refloc;
 gps.DecayFactor = 0.3;
@@ -37,7 +32,7 @@ gps.HorizontalPositionAccuracy = 1.6;
 gps.VerticalPositionAccuracy = 1.6;
 gps.VelocityAccuracy = 0.1;
 
-%% simulate IMU
+% simulate IMU
 imu = imuSensor('accel-gyro-mag', 'SampleRate', imuFs);
 imu.MagneticField = [19.5281 -5.0741 48.0067];
 
@@ -60,35 +55,37 @@ imu.Magnetometer.Resolution = 0.1;
 imu.Magnetometer.ConstantBias = 100;
 imu.Magnetometer.NoiseDensity = 0.3/ sqrt(50);
 
-%% intialize filter state
+% intialize filter state
 % using ground truth for now
-initstate = zeros(22, 1);
-initstate(1:4) = compact(meanrot(trajOrient(1:100)));
-initstate(5:7) = mean(trajPos(1:100,:), 1);
-initstate(8:10) = mean(trajVel(1:100, :), 1);
-initstate(11:13) = imu.Gyroscope.ConstantBias./imuFs; % convert from rad/s to how much error in rad the bias contributes for one sample
-initstate(14:16) = imu.Accelerometer.ConstantBias./imuFs; % convert from m/s^2 to how much error in m/s the bias contributes for one sample
-initstate(17:19) = imu.MagneticField;
-initstate(20:22) = imu.Magnetometer.ConstantBias;
-fusionfilt.State = initstate;
+initstate = zeros(16, 1);
+initstate(1:3) = mean(trajPos(1:100,:), 1)';
+initstate(4:6) = mean(trajVel(1:100, :), 1)';
+initstate(7:10) = compact(meanrot(trajOrient(1:100)))';
+initstate(11:13) = imu.Accelerometer.ConstantBias;
+initstate(14:16) = imu.Gyroscope.ConstantBias;
 
-%% initialize variances
+% initialize variances
 Rmag = 0.0862; % magnetometer
 Rvel = 0.0051; % gps velocity
 Rpos = 5.169; % gps position
 
+P = 1e-9*eye(15);
+sig_an = imu.Accelerometer.NoiseDensity * sqrt(imuFs);
+sig_wn = imu.Gyroscope.NoiseDensity * sqrt(imuFs);
+sig_aw = sqrt(0.010716);
+sig_ww = sqrt(1.3436e-14);
+g = [0; 0; -9.81];
+kf = ESKF(initstate, P, sig_an, sig_wn, sig_aw, sig_ww, g);
+
 % process noise
-fusionfilt.AccelerometerBiasNoise = 0.010716; 
-fusionfilt.AccelerometerNoise = 9.7785; 
-fusionfilt.GyroscopeBiasNoise = 1.3436e-14; 
-fusionfilt.GyroscopeNoise =  0.00016528; 
-fusionfilt.MagnetometerBiasNoise = 2.189e-11;
-fusionfilt.GeomagneticVectorNoise = 7.67e-13;
+% fusionfilt.AccelerometerBiasNoise = 0.010716; 
+% fusionfilt.AccelerometerNoise = 9.7785; 
+% fusionfilt.GyroscopeBiasNoise = 1.3436e-14; 
+% fusionfilt.GyroscopeNoise =  0.00016528; 
+% fusionfilt.MagnetometerBiasNoise = 2.189e-11;
+% fusionfilt.GeomagneticVectorNoise = 7.67e-13;
 
-% Initial error covariance
-fusionfilt.StateCovariance = 1e-9*eye(22);
-
-%% initialize scopes
+% initialize scopes
 useErrScope = true; % streaming error plot
 usePoseView = true; % 3D pose viewer
 
@@ -119,7 +116,7 @@ if usePoseView
         'ZPositionLimits', [-10 10]);
 end
 
-%% simulation loop
+% simulation loop
 secondsToSimulate = 50; % out of 142 secs
 numsamples = secondsToSimulate*imuFs;
 
@@ -129,7 +126,7 @@ loopBound = floor(loopBound/imuFs)*imuFs; % ensure enough IMU samples
 % log data
 pqorient = quaternion.zeros(loopBound, 1);
 pqpos = zeros(loopBound, 3);
-pqvars = zeros(loopBound, 22, 22);
+pqvars = zeros(loopBound, 15, 15);
 
 fcnt = 1;
 
@@ -139,26 +136,27 @@ while (fcnt <= loopBound) % update loop, at GPS frequency
            % simulate the IMU data at the current pose
            [accel, gyro, mag] = imu(trajAcc(fcnt,:), trajAngVel(fcnt,:), trajOrient(fcnt,:));
 
-           predict(fusionfilt, accel, gyro);
+           kf = kf.predict([accel(:); gyro(:)], 1/imuFs);
 
-           [fusedPos, fusedOrient] = pose(fusionfilt);
+           [fusedPos, fusedOrient] = kf.pose();
 
            % save
            pqorient(fcnt) = fusedOrient;
-           pqpos(fcnt,:) = fusedPos;
-           pqvars(fcnt,:,:) = fusionfilt.StateCovariance;
+           pqpos(fcnt,:) = fusedPos';
+           pqvars(fcnt,:,:) = kf.P;
 
            % compute errors and plot
            if useErrScope
                orientErr = rad2deg(dist(fusedOrient, trajOrient(fcnt)));
-               posErr = fusedPos - trajPos(fcnt,:);
+               posErr = fusedPos' - trajPos(fcnt,:);
                errscope(orientErr, posErr(1), posErr(2), posErr(3));
            end
 
            % update the pose viewer
            if usePoseView
                posescope(pqpos(fcnt,:), pqorient(fcnt), ...
-                   trajPos(fcnt,:), trajOrient(fcnt))
+                   trajPos(fcnt,:), trajOrient(fcnt));
+
            end
            fcnt = fcnt + 1;
     end
@@ -166,12 +164,22 @@ while (fcnt <= loopBound) % update loop, at GPS frequency
     % simulate GPS
     [lla, gpsvel] = gps(trajPos(fcnt,:), trajVel(fcnt,:));
 
+    % GPS position + velocity update
+    gpsPos = lla2ned(lla, refloc, 'ellipsoid');
+    H_x_gps = zeros(6, 16);
+    H_x_gps(1:3, 1:3) = eye(3);
+    H_x_gps(4:6, 4:6) = eye(3);
+    R_gps = blkdiag(eye(3) .* Rpos, eye(3) .* Rvel);
+    kf = kf.update(kf.x_nom(1:6), [gpsPos(:); gpsvel(:)], R_gps, H_x_gps);
 
-    fusegps(fusionfilt, lla, Rpos, gpsvel, Rvel);
-    fusemag(fusionfilt, mag, Rmag);
+    % Magnetometer update
+    m_ref = imu.MagneticField(:);
+    H_x_mag = zeros(3, 16);
+    H_x_mag(1:3, 7:10) = kf.get_inverse_rotation_H_x(m_ref);
+    kf = kf.update(kf.get_rotation_matrix()' * m_ref, mag(:) - imu.Magnetometer.ConstantBias(:), eye(3) .* Rmag, H_x_mag);
 end
 
-%% RMS error computation
+% RMS error computation
 dpos = pqpos(1:loopBound,:) - trajPos(1:loopBound,:);
 
 % For orientation, quaternion distance is a much better alternative to
