@@ -1,4 +1,4 @@
-InvictusDES_V2_BOM
+InvictusDES_V2_BOM,,,,,,,,
 Id,Designator,Footprint,Quantity,Designation,Supplier,Manufacturer,MPN,Notes
 1,U6,LGA-14L_2p5X3p0X0p86_STM,1,LSM6DSV32XTR,Digikey,STMicroelectronics,LSM6DSV32XTR,
 2,"D1,D2",LED_0603_1608Metric,2,LED,Digikey,Yongyu Optoelectronics,YY0603GR-NZ1S0-T2AR4,Green
