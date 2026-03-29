@@ -13,7 +13,7 @@ end
 
 accel_noise_density=190e-6*9.81; % 150 ug / sqrt(Hz)
 gyro_noise_density=deg2rad(0.014); % 0.014 deg/s / sqrt(Hz)
-mag_noise=12.4; % 1.4 uT
+mag_noise=19.4; % 1.4 uT
 
 % IMU noise parameters — tune for your sensor
 sig_an = accel_noise_density*sqrt(Fs);      % accelerometer white noise (m/s^2/sqrt(Hz))
@@ -119,7 +119,7 @@ while toc <= runTime
         H = H_x_accel * kf.get_X_dx();
         S = H * kf.P * H.' + R_accel;
         D2 = y.' * (S \ y);
-        if true | D2 < chi2inv(0.997, 3)
+        if D2 < chi2inv(0.997, 3)
             kf = kf.update(pred_accel, accel_sample, R_accel, H_x_accel);
             accel_used = true;
         end
