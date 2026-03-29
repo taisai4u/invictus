@@ -119,7 +119,7 @@ while toc <= runTime
         H = H_x_accel * kf.get_X_dx();
         S = H * kf.P * H.' + R_accel;
         D2 = y.' * (S \ y);
-        if D2 < chi2inv(0.997, 3)
+        if false & D2 < chi2inv(0.997, 3)
             kf = kf.update(pred_accel, accel_sample, R_accel, H_x_accel);
             accel_used = true;
         end
