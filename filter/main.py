@@ -92,13 +92,32 @@ class FlightFilter:
         X_dx[10:16, 9:15] = np.eye(6)
         return X_dx
 
-    def update(self, h, z, R, H_x, gating_threshold=0.99):
+    def get_inverse_rotation_H_x(self, vec: np.ndarray):
+        q0, q1, q2, q3 = self.x_nom[6:10]
+        p = np.array([q1, q2, q3])
+        H = np.zeros((3, 4))
+        H[0:3, 0:1] = 2 * (q0 * vec.reshape(3, 1) + np.cross(vec, p).reshape(3, 1))
+        H[0:3, 1:4] = 2 * (
+            np.dot(p, vec) * np.eye(3)
+            + np.outer(p, vec)
+            - np.outer(vec, p)
+            + q0 * skew_symmetric(vec)
+        )
+        return H
+
+    def compare_prediction_with_measurement(self, R, H_x):
+        H = H_x @ self.get_X_dx()
+        print(f"H @ P @ H.T: {H @ self.f.P @ H.T}")
+        print(f"R: {R}")
+
+    def update(self, h, z, R, H_x, gating_threshold=0.997, dof=None):
+        # return 0, True, 0, np.zeros(3)
         H = H_x @ self.get_X_dx()
         y = z - h(self.x_nom)
         S = H @ self.f.P @ H.T + R
 
         # dof of the measurement
-        k = len(y)
+        k = dof if dof is not None else len(y)
 
         K = self.f.P @ H.T @ np.linalg.inv(S)
         log_likelihood = -0.5 * (
@@ -112,8 +131,13 @@ class FlightFilter:
         chi2_threshold = chi2.ppf(gating_threshold, k)
         if D2 > chi2_threshold:
             # reject measurement
-            print(f"Rejected measurement with D2 = {D2}")
-            return log_likelihood
+            print(
+                f"Rejected measurement with D2 = {D2}, DOF={k}, Threshold = {chi2_threshold}."
+            )
+            print(f"H @ P @ H.T: {H @ self.f.P @ H.T}")
+            print(f"R: {R}")
+            print(f"z: {z}, h(x_nom): {h(self.x_nom)}")
+            return log_likelihood, False, D2, y
 
         # update error state: x, P
         self.f.x = self.f.x + K @ y
@@ -134,7 +158,7 @@ class FlightFilter:
         self.f.P = G @ self.f.P @ G.T
         self.f.x = np.zeros(15)
 
-        return log_likelihood
+        return log_likelihood, True, D2, y
 
 
 # %%
@@ -206,13 +230,15 @@ class RocketSim:
         self.sigma_altimeter = sigma_altimeter
         self.sigma_magnetometer = sigma_magnetometer
 
-    def _compute_aero_force(self):
+        self.acc = np.zeros(3)
+
+    def _compute_aero_force(self, vel, quat):
         """Compute aerodynamic drag force in body frame.
 
         Drag is split into axial (along body z) and lateral components
         because a rocket has very different drag profiles nose-on vs sideways.
         """
-        vel_body = self.quat.inv().apply(self.vel)
+        vel_body = quat.inv().apply(vel)
         speed = np.linalg.norm(vel_body)
         if speed < 1e-6:
             return np.zeros(3)
@@ -238,7 +264,7 @@ class RocketSim:
 
         return np.array([F_lateral[0], F_lateral[1], F_axial])
 
-    def _compute_aero_damping_torque(self):
+    def _compute_aero_damping_torque(self, omega):
         """Compute aerodynamic rotational damping torque in body frame.
 
         Opposes angular rates — models the fact that a spinning/tumbling rocket
@@ -246,59 +272,88 @@ class RocketSim:
         """
         return -np.array(
             [
-                self.Cd_pitch * self.omega[0],  # pitch damping
-                self.Cd_pitch * self.omega[1],  # yaw damping
-                self.Cd_roll * self.omega[2],  # roll damping
+                self.Cd_pitch * omega[0],
+                self.Cd_pitch * omega[1],
+                self.Cd_roll * omega[2],
             ]
         )
 
-    def step(self, dt, thrust, torque, grounded=False):
-        # --- Translational dynamics (world frame) ---
-        thrust_world = self.quat.apply(thrust)
-        drag_body = self._compute_aero_force()
-        drag_world = self.quat.apply(drag_body)
-        self.force_noise_world = randn(3) * self.sigma_force
-        acc = (thrust_world + drag_world + self.force_noise_world) / self.m + self.g
-        if grounded:
-            acc = np.zeros(3)
-        self.pos += self.vel * dt + 0.5 * acc * dt**2
-        self.vel += acc * dt
+    def _derivatives(
+        self, state, thrust_body, torque_body, force_noise_world, torque_noise, grounded
+    ):
+        vel = state[3:6]
+        q = state[6:10]
+        omega = state[10:13]
 
-        # --- Rotational dynamics (body frame) ---
-        aero_damping = self._compute_aero_damping_torque()
+        rot = Rotation.from_quat(q, scalar_first=True)
+
+        thrust_world = rot.apply(thrust_body)
+        drag_world = rot.apply(self._compute_aero_force(vel, rot))
+        total_force = thrust_world + drag_world + force_noise_world + self.m * self.g
+        if grounded:
+            total_force -= self.m * self.g
+
+        acc = total_force / self.m
+
+        qw, qx, qy, qz = q
+        wx, wy, wz = omega
+        q_dot = 0.5 * np.array(
+            [
+                -qx * wx - qy * wy - qz * wz,
+                qw * wx + qy * wz - qz * wy,
+                qw * wy - qx * wz + qz * wx,
+                qw * wz + qx * wy - qy * wx,
+            ]
+        )
+
+        torques = torque_body + self._compute_aero_damping_torque(omega) + torque_noise
+        omega_dot = self.I_inv @ (torques - np.cross(omega, self.I @ omega))
+
+        return np.concatenate([vel, acc, q_dot, omega_dot])
+
+    def step(self, dt, thrust_body, torque_body, grounded=False):
+        force_noise_world = randn(3) * self.sigma_force
         torque_noise = randn(3) * self.sigma_torque
 
-        self.quat = self.quat * Rotation.from_rotvec(self.omega * dt)
-        omega_dot = self.I_inv @ (
-            torque
-            + aero_damping
-            + torque_noise
-            - np.cross(self.omega, self.I @ self.omega)
+        state = np.concatenate(
+            [self.pos, self.vel, self.quat.as_quat(scalar_first=True), self.omega]
         )
-        self.omega += omega_dot * dt
+        args = (thrust_body, torque_body, force_noise_world, torque_noise, grounded)
 
-        # --- Bias random walk ---
+        k1 = dt * self._derivatives(state, *args)
+        k2 = dt * self._derivatives(state + 0.5 * k1, *args)
+        k3 = dt * self._derivatives(state + 0.5 * k2, *args)
+        k4 = dt * self._derivatives(state + k3, *args)
+
+        state_new = state + (k1 + 2 * k2 + 2 * k3 + k4) / 6
+
+        self.pos = state_new[0:3]
+        self.vel = state_new[3:6]
+        q_new = state_new[6:10]
+        q_new /= np.linalg.norm(q_new)
+        self.quat = Rotation.from_quat(q_new, scalar_first=True)
+        self.omega = state_new[10:13]
+
+        # Store final acceleration for IMU reading
+        thrust_world = self.quat.apply(thrust_body)
+        drag_world = self.quat.apply(self._compute_aero_force(self.vel, self.quat))
+        total_force = thrust_world + drag_world + force_noise_world + self.m * self.g
+        if grounded:
+            total_force -= self.m * self.g
+        self.acc = total_force / self.m
+
         self.a_b += randn(3) * self.sigma_a_walk * np.sqrt(dt)
         self.w_b += randn(3) * self.sigma_w_walk * np.sqrt(dt)
 
-    def get_imu_reading(self, thrust, grounded=False):
-        thrust_body = thrust / self.m
-        drag_body = self._compute_aero_force() / self.m
-        gravity_body = self.quat.inv().apply(self.g)
-        gravity_body_experienced = np.zeros(3) if grounded else gravity_body
-        force_noise_body = self.quat.inv().apply(self.force_noise_world) / self.m
-        a_true = (
-            thrust_body
-            + drag_body
-            + force_noise_body
-            + gravity_body_experienced
-            - gravity_body
-        )
+    def get_imu_reading(self):
+        # Specific force is net acceleration minus gravity
+        specific_force_world = self.acc - self.g
 
-        w_true = self.omega
+        # Rotate into what the sensor actually feels in the body frame
+        specific_force_b = self.quat.inv().apply(specific_force_world)
 
-        a_m = a_true + self.a_b + randn(3) * self.sigma_a_noise
-        w_m = w_true + self.w_b + randn(3) * self.sigma_w_noise
+        a_m = specific_force_b + self.a_b + randn(3) * self.sigma_a_noise
+        w_m = self.omega + self.w_b + randn(3) * self.sigma_w_noise
         return a_m, w_m
 
     def get_gps_reading(self):
@@ -370,13 +425,13 @@ SIGMA_FORCE_NOISE = 0.5  # translational disturbance [N]
 SIGMA_TORQUE_NOISE = 0.01  # rotational disturbance [N·m]
 
 # --- Sensor noise for observation models ---
-SIGMA_GPS = np.array([50, 50, 30])  # GPS position noise [m]
+SIGMA_GPS = np.array([3, 3, 50])  # GPS position noise [m]
 SIGMA_ALTIMETER = 0.5  # altimeter noise [m]
 SIGMA_MAGNETOMETER = 0.05  # magnetometer noise [normalized]
 
 GPS_INTERVAL = 300
 ALTIMETER_INTERVAL = 100
-MAGNETOMETER_INTERVAL = 234
+MAGNETOMETER_INTERVAL = 50
 
 # %%
 # ============================================================
@@ -420,7 +475,7 @@ def run_simulation():
             roll = 0.0
             pitch = 0.0
             yaw = 0.0
-        return np.array([pitch, yaw, roll])
+        return np.array([pitch, yaw, roll]) * 0.1
 
     # Create sim
     sim = RocketSim(
@@ -450,23 +505,6 @@ def run_simulation():
         sigma_gps=SIGMA_GPS,
         sigma_altimeter=SIGMA_ALTIMETER,
         sigma_magnetometer=SIGMA_MAGNETOMETER,
-    )
-
-    x_nom = np.zeros(16)
-    x_nom[6:10] = quat_0.as_quat(scalar_first=True)
-    # DO NOT LEAVE THIS AS 500
-    # the kinematics are non-linear for non-small errors
-    # properly initialize this using the first position and orientation estimates
-    # will be initialized using the first gps reading (pre-launch)
-    P = np.eye(15) * 500
-    kf = FlightFilter(
-        x_nom=x_nom,
-        P=P,
-        sigma_a_noise=SIGMA_ACCEL_NOISE,
-        sigma_w_noise=SIGMA_GYRO_NOISE,
-        sigma_a_walk=SIGMA_ACCEL_WALK,
-        sigma_w_walk=SIGMA_GYRO_WALK,
-        g=G,
     )
 
     def h_gps(x_nom):
@@ -522,100 +560,88 @@ def run_simulation():
     mag_ll_times = []
 
     first_states_logged = False
-    first_gps_read = False
+
+    # initialize the filter
+    x_nom = np.zeros(16)
+    P = np.eye(15) * 500
+    P[9:12, 9:12] = np.eye(3) * SIGMA_ACCEL_WALK**2 * 2
+    P[12:15, 12:15] = np.eye(3) * SIGMA_GYRO_WALK**2 * 2
+    gps = sim.get_gps_reading()
+    x_nom[0:3] = gps
+    P[0:3, 0:3] = R_gps
+    a_m, w_m = sim.get_imu_reading()
+    m_m = sim.get_magnetometer_reading()
+    q, R_cov = get_orientation_and_covariance(
+        a_m,
+        m_m,
+        np.ones(3) * SIGMA_ACCEL_NOISE,
+        np.ones(3) * SIGMA_MAGNETOMETER,
+        G,
+        NORTH,
+    )
+    x_nom[6:10] = q
+    P[6:9, 6:9] = R_cov
+    kf = FlightFilter(
+        x_nom=x_nom,
+        P=P,
+        sigma_a_noise=SIGMA_ACCEL_NOISE,
+        sigma_w_noise=SIGMA_GYRO_NOISE,
+        sigma_a_walk=SIGMA_ACCEL_WALK,
+        sigma_w_walk=SIGMA_GYRO_WALK,
+        g=G,
+    )
 
     store_idx = 0
     for i in range(n_steps):
         t = i * DT
-        grounded = t < START_TIME
-        thrust = f_thrust_t(t)
-        torque = f_torque_t(t)
-
-        sim.step(DT, thrust, torque, grounded)
-
-        if not grounded:
-            if not first_states_logged:
-                np.set_printoptions(precision=3)
-                print("time: ", t)
-                print("nominal state: ", kf.x_nom)
-                print("covariance in position: ", kf.f.P[0:3, 0:3])
-                print("covariance in velocity: ", kf.f.P[3:6, 3:6])
-                print("covariance in orientation: ", kf.f.P[6:9, 6:9])
-                print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
-                print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
-                first_states_logged = True
-            a_m, w_m = sim.get_imu_reading(thrust, grounded)
-            kf.predict(np.concatenate((a_m, w_m)), DT)
+        if not first_states_logged:
+            np.set_printoptions(precision=3)
+            print("time: ", t)
+            print("nominal state: ", kf.x_nom)
+            print("covariance in position: ", kf.f.P[0:3, 0:3])
+            print("covariance in velocity: ", kf.f.P[3:6, 3:6])
+            print("covariance in orientation: ", kf.f.P[6:9, 6:9])
+            print("covariance in bias in acceleration: ", kf.f.P[10:13, 10:13])
+            print("covariance in bias in gyro: ", kf.f.P[13:16, 13:16])
+            first_states_logged = True
+        a_m, w_m = sim.get_imu_reading()
+        kf.predict(np.concatenate((a_m, w_m)), DT)
 
         if i % GPS_INTERVAL == 0:
             z = sim.get_gps_reading()
-            if not first_gps_read:
-                kf.x_nom[0:3] = z
-                kf.f.P[0:3, 0:3] = R_gps
-                kf.f.P[3:6, 3:6] = np.eye(3) * 2.0**2
-                kf.f.P[9:12, 9:12] = np.eye(3) * 0.1**2
-                kf.f.P[12:15, 12:15] = np.eye(3) * 0.1**2
-                print("first pos: ", kf.x_nom[0:3])
-                print("first covariance: ", kf.f.P[0:3, 0:3])
-                first_gps_read = True
-            else:
-                if t < START_TIME:
-                    print(
-                        "pos, covariance before update: ",
-                        kf.x_nom[0:3],
-                        kf.f.P[0:3, 0:3],
-                    )
-                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
-                    gps_log_likelihoods.append(ll)
-                    gps_ll_times.append(t)
-                    print(
-                        "pos, covariance after update: ",
-                        kf.x_nom[0:3],
-                        kf.f.P[0:3, 0:3],
-                    )
-                else:
-                    ll = kf.update(h_gps, z, R_gps, H_x_gps)
-                    gps_log_likelihoods.append(ll)
-                    gps_ll_times.append(t)
+            ll, accepted, nis, _ = kf.update(h_gps, z, R_gps, H_x_gps)
+            gps_log_likelihoods.append(ll)
+            gps_ll_times.append(t)
+            if not accepted:
+                print("GPS measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % ALTIMETER_INTERVAL == 0:
             z = np.array([sim.get_altimeter_reading()])
-            ll = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
+            ll, accepted, nis, _ = kf.update(h_altimeter, z, R_altimeter, H_x_altimeter)
             alt_log_likelihoods.append(ll)
             alt_ll_times.append(t)
+            if not accepted:
+                print("Altitude measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % MAGNETOMETER_INTERVAL == 0:
-            if grounded:
-                a_m, w_m = sim.get_imu_reading(thrust, grounded)
-                m_m = sim.get_magnetometer_reading()
-                q, R_cov = get_orientation_and_covariance(
-                    a_m,
-                    m_m,
-                    np.ones(3) * SIGMA_ACCEL_NOISE,
-                    np.ones(3) * SIGMA_MAGNETOMETER,
-                )
-                kf.x_nom[6:10] = q
-                kf.f.P[6:9, 6:9] = R_cov
-            else:
-                z = sim.get_magnetometer_reading()
-                z = z / np.linalg.norm(z)
-                q0, q1, q2, q3 = kf.x_nom[6:10]
-                p = np.array([q1, q2, q3])
+            z = sim.get_magnetometer_reading()
+            z = z / np.linalg.norm(z)
+            q0, q1, q2, q3 = kf.x_nom[6:10]
+            p = np.array([q1, q2, q3])
 
-                H_x_magnetometer = np.zeros((3, 16))
-                H_x_magnetometer[0:3, 6:7] = 2 * (
-                    q0 * NORTH.reshape(3, 1) + np.cross(NORTH, p).reshape(3, 1)
-                )
-                H_x_magnetometer[0:3, 7:10] = 2 * (
-                    np.dot(p, NORTH) * np.eye(3)
-                    + np.outer(p, NORTH)
-                    - np.outer(NORTH, p)
-                    + q0 * skew_symmetric(NORTH)
-                )
+            H_x_magnetometer = np.zeros((3, 16))
+            H_x_magnetometer[0:3, 6:10] = kf.get_inverse_rotation_H_x(NORTH)
 
-                ll = kf.update(h_magnetometer, z, R_magnetometer, H_x_magnetometer)
-                mag_log_likelihoods.append(ll)
-                mag_ll_times.append(t)
+            ll, accepted, nis, _ = kf.update(
+                h_magnetometer, z, R_magnetometer, H_x_magnetometer
+            )
+            mag_log_likelihoods.append(ll)
+            mag_ll_times.append(t)
+            if not accepted:
+                print("Magnetometer measurement rejected at time: ", t)
+                print("measurement: ", z)
 
         if i % downsample == 0:
             times[store_idx] = t
@@ -663,6 +689,8 @@ def run_simulation():
             true_w_b = true_w_b[:store_idx]
             break
 
+        sim.step(DT, f_thrust_t(t), f_torque_t(t), grounded=t < START_TIME)
+
     return {
         "times": times,
         "positions": positions,
@@ -697,7 +725,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 
-def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m):
+def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m, g, north):
     a_m = np.asarray(a_m, dtype=float)
     m_m = np.asarray(m_m, dtype=float)
 
@@ -717,11 +745,11 @@ def get_orientation_and_covariance(a_m, m_m, sigma_a, sigma_m):
     M_B = np.column_stack((v1_b, v2_b, v3_b))
 
     # reference vectors
-    w_a = -G
-    w_m = NORTH
+    w_a = -g
+    w_m = north
 
     # reference orthogonal basis
-    v1_w = w_a
+    v1_w = w_a / np.linalg.norm(w_a)
     v2_w = np.cross(v1_w, w_m)
     v2_w = v2_w / np.linalg.norm(v2_w)
     v3_w = np.cross(v1_w, v2_w)
@@ -1410,6 +1438,15 @@ def plot_results(data):
     x_nom_full = data["kf_x_nom_full"]
     P_full = data["kf_P_full"]
 
+    state_groups = [
+        ("Position", slice(0, 3), slice(0, 3)),
+        ("Velocity", slice(3, 6), slice(3, 6)),
+        ("Attitude", slice(6, 9), slice(6, 9)),
+        ("Accel Bias", slice(9, 12), slice(9, 12)),
+        ("Gyro Bias", slice(12, 15), slice(12, 15)),
+    ]
+    nees_per_group = {name: np.zeros(n) for name, _, _ in state_groups}
+
     for i in range(n):
         dx = np.zeros(15)
         dx[0:3] = pos_true[i] - x_nom_full[i, 0:3]
@@ -1421,6 +1458,18 @@ def plot_results(data):
         dx[9:12] = a_b_true[i] - x_nom_full[i, 10:13]
         dx[12:15] = w_b_true[i] - x_nom_full[i, 13:16]
         nees[i] = dx @ np.linalg.solve(P_full[i], dx)
+        for name, dx_sl, p_sl in state_groups:
+            dx_g = dx[dx_sl]
+            P_g = P_full[i][p_sl, p_sl]
+            nees_per_group[name][i] = dx_g @ np.linalg.solve(P_g, dx_g)
+
+    group_colors = {
+        "Position": "#339af0",
+        "Velocity": "#51cf66",
+        "Attitude": "#ffd43b",
+        "Accel Bias": "#ff6b6b",
+        "Gyro Bias": "#e599f7",
+    }
 
     fig_nees = go.Figure()
     fig_nees.add_trace(
@@ -1428,14 +1477,30 @@ def plot_results(data):
             x=times,
             y=nees,
             mode="lines",
-            line=dict(color="#51cf66", width=1.5),
-            name="NEES",
+            line=dict(color="rgba(255,255,255,0.3)", width=1),
+            name="Total NEES",
         )
+    )
+    for name, _, _ in state_groups:
+        fig_nees.add_trace(
+            go.Scatter(
+                x=times,
+                y=nees_per_group[name],
+                mode="lines",
+                line=dict(color=group_colors[name], width=1.5),
+                name=name,
+            )
+        )
+    fig_nees.add_hline(
+        y=3,
+        line=dict(color="rgba(255,255,255,0.3)", width=1, dash="dash"),
+        annotation_text="E[NEES] per group = 3",
+        annotation_font_color="white",
     )
     fig_nees.add_hline(
         y=15,
         line=dict(color="rgba(255,255,255,0.4)", width=1, dash="dash"),
-        annotation_text="E[NEES] = dim(x) = 15",
+        annotation_text="E[NEES] total = 15",
         annotation_font_color="white",
     )
     fig_nees.add_vline(
@@ -1447,16 +1512,14 @@ def plot_results(data):
         line=dict(color="rgba(100,255,100,0.4)", width=1, dash="dash"),
     )
     fig_nees.update_layout(
-        title=dict(
-            text="NEES (Normalized Estimation Error Squared)", font=dict(size=18)
-        ),
+        title=dict(text="NEES by State Group", font=dict(size=18)),
         xaxis_title="Time (s)",
         yaxis_title="NEES",
         paper_bgcolor="rgb(20, 20, 35)",
         plot_bgcolor="rgb(25, 25, 40)",
         font=dict(color="white", size=10),
         width=900,
-        height=400,
+        height=500,
         xaxis=dict(
             gridcolor="rgba(255,255,255,0.07)",
             zerolinecolor="rgba(255,255,255,0.15)",
@@ -1467,26 +1530,29 @@ def plot_results(data):
         ),
     )
 
-    return fig_3d, fig_ts, fig_ll, fig_nees
+    return fig_3d, fig_ts, fig_ll, fig_nees, nees
 
 
-print("Running rocket simulation...")
-data = run_simulation()
+if __name__ == "__main__":
+    print("Running rocket simulation...")
+    data = run_simulation()
 
-t = data["times"]
-pos = data["positions"]
-apogee_idx = np.argmax(pos[:, 2])
-print(f"Apogee: {pos[apogee_idx, 2]:.1f} m at t={t[apogee_idx]:.1f} s")
-print(f"Max speed: {np.max(np.linalg.norm(data['velocities'], axis=1)):.1f} m/s")
-print(f"Max roll rate: {np.max(np.abs(np.degrees(data['omegas'][:, 2]))):.1f} °/s")
-print(f"Flight time: {t[-1]:.1f} s")
-print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
-print(f"Final quaternion: {data['quats'][-1]}")
+    t = data["times"]
+    pos = data["positions"]
+    apogee_idx = np.argmax(pos[:, 2])
+    print(f"Apogee: {pos[apogee_idx, 2]:.1f} m at t={t[apogee_idx]:.1f} s")
+    print(f"Max speed: {np.max(np.linalg.norm(data['velocities'], axis=1)):.1f} m/s")
+    print(f"Max roll rate: {np.max(np.abs(np.degrees(data['omegas'][:, 2]))):.1f} °/s")
+    print(f"Flight time: {t[-1]:.1f} s")
+    print(f"Landing distance: {np.sqrt(pos[-1, 0]**2 + pos[-1, 1]**2):.1f} m")
+    print(f"Final quaternion: {data['quats'][-1]}")
 
-fig_3d, fig_ts, fig_ll, fig_nees = plot_results(data)
-fig_3d.show()
-fig_ts.show()
-fig_ll.show()
-fig_nees.show()
+    fig_3d, fig_ts, fig_ll, fig_nees, nees = plot_results(data)
+    fig_3d.show()
+    fig_ts.show()
+    fig_ll.show()
+    fig_nees.show()
+
+    print(f"Average NEES: {np.mean(nees):.3f}")
 
 # %%
