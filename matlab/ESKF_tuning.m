@@ -42,8 +42,6 @@ imu.Accelerometer.MeasurementRange =  19.6133;
 imu.Accelerometer.Resolution = 0.0023928;
 imu.Accelerometer.ConstantBias = 0.19;
 imu.Accelerometer.NoiseDensity = 0.0012356;
-% imu.Accelerometer.ConstantBias = 0.0;
-% imu.Accelerometer.NoiseDensity = 0.0;
 
 % Gyroscope
 imu.Gyroscope.MeasurementRange = deg2rad(250);
@@ -71,10 +69,8 @@ end
 % intialize filter state
 initstate = zeros(16, 1);
 [lla,vel] = gps(trajPos(1:1,:), trajVel(1:1,:));
-% initstate(1:3) = lla2ned(lla, refloc, 'ellipsoid');
-% initstate(4:6) = vel;
-initstate(1:3) = trajPos(1:1,:);
-initstate(4:6) = trajVel(1:1,:);
+initstate(1:3) = lla2ned(lla, refloc, 'ellipsoid');
+initstate(4:6) = vel;
 initstate(7:10) = compact(meanrot(trajOrient(1:100)));
 % do NOT set to 0 and have the filter learn the initial true value!
 % having ANY significant uncertainty in the bias makes the filter diverge
@@ -90,9 +86,7 @@ Rbaro = sig_baro.^2;
 P = 500*eye(15);
 P(1:3,1:3) = eye(3).*Rpos^2;
 P(4:6,4:6) = eye(3).*Rvel^2;
-P(1:3,1:3) = eye(3).*0.0001^2;
-P(4:6,4:6) = eye(3).*0.0001^2;
-P(7:9,7:9) = eye(3).*0.000001523598776.^2;
+P(7:9,7:9) = eye(3).*0.00001523598776.^2;
 P(10:12,10:12) = eye(3).*1e-9;
 P(13:15,13:15) = eye(3).*1e-9;
 sig_an = imu.Accelerometer.NoiseDensity * sqrt(imuFs);
@@ -143,7 +137,7 @@ end
 
 function [kf, rms_pos, rms_orient] = evalFilter(kf, dt, gpsInterval, imu, gps, refloc, Rpos, Rmag, Rvel, Rbaro, trajPos, trajVel, trajAcc, trajOrient, trajAngVel, errscope, posescope)
     % simulation loop
-    secondsToSimulate = 35; % out of 142 secs
+    secondsToSimulate = 100; % out of 142 secs
     numsamples = secondsToSimulate/dt;
     
     loopBound = floor(numsamples);
@@ -164,6 +158,9 @@ function [kf, rms_pos, rms_orient] = evalFilter(kf, dt, gpsInterval, imu, gps, r
                [accel, gyro, mag] = imu(trajAcc(fcnt,:), trajAngVel(fcnt,:), trajOrient(fcnt,:));
                % if 101<fcnt<201
                %     trajAcc(fcnt,:)-(rotatepoint(trajOrient(fcnt),-accel)+kf.g.')
+               %     this difference should be quite close to zero, proving
+               %     that this is the right formula to go from measured to
+               %     true acceleration
                % end
                 
                % negating the accelerometer measurement because 
@@ -238,3 +235,4 @@ fprintf('\tX: %.2f , Y: %.2f, Z: %.2f   (meters)\n\n',rms_pos(1), rms_pos(2), rm
 fprintf('End-to-End Quaternion Distance RMS Error (degrees) \n');
 fprintf('\t%.2f (degrees)\n\n', rms_orient);
 % disp(kf.x_nom);
+% disp(kf.P)
