@@ -223,6 +223,7 @@ class RocketSim:
         self.Cd_roll = Cd_roll
         self.Cd_pitch = Cd_pitch
         # Process noise
+        self.force_noise_world = np.zeros(3)
         self.sigma_force = sigma_force
         self.sigma_torque = sigma_torque
         self.sigma_gps = sigma_gps
@@ -462,12 +463,12 @@ def run_simulation():
         if t < START_TIME:
             return np.zeros(3)
         if t < BURN_TIME:
-            roll = 0.06 + 0.02 * np.sin(4.0 * t)
+            roll = 0.21 + 0.07 * np.sin(4.0 * t)
             pitch = 0.3 * np.sin(2.0 * t)
             yaw = -0.2 * np.cos(1.5 * t)
         elif t < BURN_TIME + 5.0:
             decay = np.exp(-(t - BURN_TIME) * 0.8)
-            roll = 0.08 * decay
+            roll = 0.28 * decay
             pitch = 0.05 * decay * np.sin(3 * t)
             yaw = 0.03 * decay * np.cos(2 * t)
         else:
