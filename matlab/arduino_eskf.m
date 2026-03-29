@@ -1,7 +1,11 @@
 Fs = 100;
 samplesPerRead = 10;
-runTime = 60;
+runTime = 12000;
 dt = 1/Fs;
+
+accel_offset=[-33 -8 -18].*0.01; % 1 LSB = 0.01 m/s^2
+gyro_offset=[0 -1 0].*deg2rad(1/16); % 1 LSB = 1/16 deg/s
+mag_offset=[-614 59 -355].*1/16; % 1 LSB = 1/16 uT
 
 if ~(exist('a', 'var') && isvalid(a))
     a = arduino;
@@ -11,9 +15,9 @@ if ~(exist('imu', 'var') && isa(imu, 'bno055'))
         'SamplesPerRead', samplesPerRead, 'I2CAddress', 0x28, 'OperatingMode', 'amg');
 end
 
-accel_noise_density=190e-6*9.81; % 150 ug / sqrt(Hz)
+accel_noise_density=180e-6*9.81; % 150 ug / sqrt(Hz)
 gyro_noise_density=deg2rad(0.014); % 0.014 deg/s / sqrt(Hz)
-mag_noise=19.4; % 1.4 uT
+mag_noise=15.4; % 1.4 uT
 
 % IMU noise parameters — tune for your sensor
 sig_an = accel_noise_density*sqrt(Fs);      % accelerometer white noise (m/s^2/sqrt(Hz))
@@ -27,7 +31,7 @@ x_nom = zeros(16, 1);
 x_nom(7) = 1;  % identity quaternion
 sigma_accel_bias_init = 80e-3 * 9.81; % BNO055 typical accel offset: ~80mg
 sigma_gyro_bias_init  = deg2rad(1.0);  % BNO055 typical gyro zero-rate offset: ~1 deg/s
-P = eye(15) * 0.01;
+P = eye(15) * 100.0;
 P(10:12,10:12) = eye(3) .* sigma_accel_bias_init.^2;
 P(13:15,13:15) = eye(3) .* sigma_gyro_bias_init.^2;
 
@@ -38,9 +42,11 @@ kf = ESKF(x_nom, P, sig_an, sig_wn, sig_aw, sig_ww, g);
 % interference detection (mirrors reader.py calibration phase)
 fprintf('Calibrating — hold sensor still...\n');
 accel_mag_angles = [];
-calibration_batches = 50; % 50 * samplesPerRead/Fs = 5 seconds
+calibration_batches = 30;
 for ci = 1:calibration_batches
     [accel_c, ~, mag_c] = imu();
+    accel_c=accel_c-accel_offset;
+    mag_c=mag_c-mag_offset;
     for si = 1:size(accel_c, 1)
         a_i = accel_c(si,:).';
         m_i = mag_c(si,:).';
@@ -48,8 +54,8 @@ for ci = 1:calibration_batches
         accel_mag_angles(end+1) = acos(max(-1, min(1, cos_angle))); %#ok<SAGROW>
     end
 end
-m_ref = mean(mag_c, 1).'; % last batch mean as world-frame reference
-m_ref_unit = m_ref / norm(m_ref);
+m_ref = mean(mag_c, 1).'; % This only works if you hold it flat and aligned with global ENU
+% m_ref = [-3.6571 21.3273 -45.0158].'; % ENU
 static_accel_mag_angle_mean = mean(accel_mag_angles);
 static_accel_mag_angle_var = var(accel_mag_angles);
 fprintf('Calibration done. Accel-mag angle: %.2f ± %.4f rad\n', ...
@@ -64,15 +70,22 @@ ax = axes(fig);
 hold(ax, 'on');
 axis(ax, 'equal');
 xlim(ax, [-1.5 1.5]); ylim(ax, [-1.5 1.5]); zlim(ax, [-1.5 1.5]);
+axis(ax, 'manual');
 xlabel(ax, 'X'); ylabel(ax, 'Y'); zlabel(ax, 'Z');
 title(ax, 'Body Frame Orientation');
 view(ax, 3);
 grid(ax, 'on');
+rotate3d(ax, 'on');
 
 % Static world frame axes (gray)
 quiver3(ax, 0,0,0, 1,0,0, 0, 'Color', [0.7 0.7 0.7], 'LineWidth', 1);
 quiver3(ax, 0,0,0, 0,1,0, 0, 'Color', [0.7 0.7 0.7], 'LineWidth', 1);
 quiver3(ax, 0,0,0, 0,0,1, 0, 'Color', [0.7 0.7 0.7], 'LineWidth', 1);
+
+% Static magnetic reference vector (faint)
+m_ref_unit = m_ref / norm(m_ref);
+quiver3(ax, 0,0,0, m_ref_unit(1),m_ref_unit(2),m_ref_unit(3), 0, ...
+    'Color', [0.5 0 0.8] .* 0.25, 'LineWidth', 1.5, 'LineStyle', '--');
 
 % Body frame axes — updated each iteration
 hx = quiver3(ax, 0,0,0, 1,0,0, 0, 'r', 'LineWidth', 2.5);
@@ -80,7 +93,7 @@ hy = quiver3(ax, 0,0,0, 0,1,0, 0, 'g', 'LineWidth', 2.5);
 hz = quiver3(ax, 0,0,0, 0,0,1, 0, 'b', 'LineWidth', 2.5);
 hm = quiver3(ax, 0,0,0, 0,1,0, 0, 'Color', [0.5 0 0.8], 'LineWidth', 2.5);
 ha = quiver3(ax, 0,0,0, 0,0,1, 0, 'Color', [1 0.5 0], 'LineWidth', 2.5);
-legend(ax, '', '', '', 'X', 'Y', 'Z', 'Mag', 'Accel', 'Location', 'northeast');
+legend(ax, '', '', '', 'Mag ref', 'X', 'Y', 'Z', 'Mag', 'Accel', 'Location', 'northeast');
 
 mag_color   = [0.5 0 0.8];
 accel_color = [1 0.5 0];
@@ -92,6 +105,9 @@ fprintf('Running for %d seconds...\n', runTime);
 tic
 while toc <= runTime
     [accel, gyro, mag] = imu();
+    accel=accel-accel_offset;
+    gyro=gyro-gyro_offset;
+    mag=mag-mag_offset;
 
     % Predict with each sample
     for i = 1:size(accel, 1)
@@ -103,7 +119,6 @@ while toc <= runTime
 
     % Accelerometer update — gravity-based tilt correction, only when static
     accel_used = false;
-    norm(accel_sample), rad2deg(norm(gyro_sample))
     imu_static = abs(norm(accel_sample) - 9.81) < 0.2 && norm(gyro_sample) < deg2rad(5);
     if imu_static
         H_x_accel = zeros(3, 16);
@@ -119,7 +134,7 @@ while toc <= runTime
         H = H_x_accel * kf.get_X_dx();
         S = H * kf.P * H.' + R_accel;
         D2 = y.' * (S \ y);
-        if false & D2 < chi2inv(0.997, 3)
+        if D2 < chi2inv(0.997, 3)
             kf = kf.update(pred_accel, accel_sample, R_accel, H_x_accel);
             accel_used = true;
         end
@@ -183,5 +198,5 @@ while toc <= runTime
     a_unit = accel_sample ./ norm(accel_sample);
     ha.UData = a_unit(1); ha.VData = a_unit(2); ha.WData = a_unit(3);
     ha.Color = accel_color .* accel_used + accel_color_faded .* ~accel_used;
-    drawnow limitrate;
+    drawnow;
 end
