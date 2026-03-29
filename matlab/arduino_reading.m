@@ -10,6 +10,10 @@ if ~exist('imu', 'var')
     imu = bno055(a, 'SampleRate', Fs, 'OutputFormat', 'matrix', ...
         'SamplesPerRead', samplesPerRead, 'I2CAddress', 0x28, 'OperatingMode','amg');
 end
+if ~exist('bmp', 'var')
+    bmp = bmp280(a, 'SampleRate', Fs, 'OutputFormat', 'matrix', ...
+        'SamplesPerRead', samplesPerRead);
+end
 compFilt = complementaryFilter('SampleRate', Fs);
 
 tuner = HelperOrientationFilterTuner(compFilt);
@@ -17,6 +21,8 @@ tic
 
 while toc <= runTime
     [accel, gyro, mag, t, overrun] = imu();
+    [pressureReading, tempReadings, timeStamps, overrun] = bmp.read();
+    
 
     if (isVerbose && overrun > 0)
         fprintf('%d samples overrun ...\n', overrun);
