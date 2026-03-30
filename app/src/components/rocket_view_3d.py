@@ -9,12 +9,22 @@ from PyQt5.QtWidgets import QFrame, QPushButton, QVBoxLayout
 
 from simulation.ground_truth import GroundTruthEstimator
 from simulation.interface import (
+    ACCEL_X,
+    ACCEL_Z,
+    GYRO_X,
+    GYRO_Z,
+    MAG_X,
+    MAG_Z,
     POS_X,
     POS_Z,
+    PRESSURE,
     Q_W,
     Q_Z,
     STATE_DIM,
+    TEMPERATURE,
     TIMESTAMP,
+    VEL_X,
+    VEL_Z,
 )
 
 _AXIS_LEN = 1.0  # base arrow length in world units (rescaled each frame)
@@ -45,6 +55,7 @@ class RocketView3D(QFrame):
 
         self._timestamps: np.ndarray | None = None
         self._states: np.ndarray | None = None
+        self._sensor_data: np.ndarray | None = None
         self._positions: np.ndarray | None = None
         self._trail_mesh: pv.PolyData | None = None
         self._trail_actor = None
@@ -113,6 +124,7 @@ class RocketView3D(QFrame):
 
         self._timestamps = sensor_data[:, TIMESTAMP]
         self._states = states
+        self._sensor_data = sensor_data
         self._positions = states[:, POS_X : POS_Z + 1].copy()
 
         self._trail_mesh = pv.PolyData(self._positions.copy())
@@ -182,8 +194,49 @@ class RocketView3D(QFrame):
                 pts[idx + 1 :] = pts[idx]
             self._trail_mesh.points = pts
 
+        if self._sensor_data is not None:
+            self._update_telemetry_overlay(state, pos, self._sensor_data[idx])
+
         self._plotter.renderer.ResetCameraClippingRange()
         self._plotter.render()
+
+    def _update_telemetry_overlay(
+        self,
+        state: np.ndarray,
+        pos: np.ndarray,
+        row: np.ndarray,
+    ) -> None:
+        px, py, pz = pos
+        vx, vy, vz = state[VEL_X : VEL_Z + 1]
+        ax, ay, az = row[ACCEL_X : ACCEL_Z + 1]
+        gx, gy, gz = row[GYRO_X : GYRO_Z + 1]
+        mx, my, mz = row[MAG_X : MAG_Z + 1]
+        pressure = row[PRESSURE]
+        temperature = row[TEMPERATURE]
+
+        text = (
+            f"Position (m)\n"
+            f"  X {px:+8.3f}  Y {py:+8.3f}  Z {pz:+8.3f}\n"
+            f"Velocity (m/s)\n"
+            f"  X {vx:+8.3f}  Y {vy:+8.3f}  Z {vz:+8.3f}\n"
+            f"Acceleration (m/s\xb2)\n"
+            f"  X {ax:+8.3f}  Y {ay:+8.3f}  Z {az:+8.3f}\n"
+            f"Angular Rate (rad/s)\n"
+            f"  X {gx:+8.4f}  Y {gy:+8.4f}  Z {gz:+8.4f}\n"
+            f"Magnetometer (\xb5T)\n"
+            f"  X {mx:+8.2f}  Y {my:+8.2f}  Z {mz:+8.2f}\n"
+            f"Pressure  {pressure:10.1f} Pa\n"
+            f"Temperature {temperature:+7.2f} \xb0C"
+        )
+        self._plotter.add_text(
+            text,
+            position="upper_right",
+            font_size=8,
+            color="white",
+            font="courier",
+            name="telemetry_overlay",
+            viewport=False,
+        )
 
     # ------------------------------------------------------------------
 

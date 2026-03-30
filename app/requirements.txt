@@ -23,6 +23,9 @@ polars-runtime-32==1.38.1
 pooch==1.9.0
 Pygments==2.19.2
 pyparsing==3.3.2
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.18
+PyQt5_sip==12.18.0
 PyQt6==6.10.2
 PyQt6-Qt6==6.10.2
 PyQt6_sip==13.11.0

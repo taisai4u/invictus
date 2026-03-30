@@ -58,17 +58,17 @@ class MissionStats(QWidget):
         max_accel = float(np.nanmax(accel_mag))
         max_accel_g = max_accel / G
 
-        self._duration_label.setText(f"Duration {duration:.2f} s")
-        self._sample_rate_label.setText(f"Sample Rate {sample_rate:.0f} Hz")
+        self._duration_label.setText(f"Duration: {duration:.2f} s")
+        self._sample_rate_label.setText(f"Sample Rate: {sample_rate:.0f} Hz")
         self._max_alt_label.setText(
-            f"Max Altitude {max_alt_m:.1f} m ({max_alt_ft:.0f} ft)"
+            f"Max Altitude: {max_alt_m:.1f} m ({max_alt_ft:.0f} ft)"
         )
         self._max_accel_label.setText(
-            f"Max Acceleration {max_accel:.1f} m/s² ({max_accel_g:.1f} G)"
+            f"Max Acceleration: {max_accel:.1f} m/s² ({max_accel_g:.1f} G)"
         )
 
     def _clear(self) -> None:
-        self._duration_label.setText("Duration — s")
-        self._sample_rate_label.setText("Sample Rate — Hz")
-        self._max_alt_label.setText("Max Altitude — m (— ft)")
-        self._max_accel_label.setText("Max Acceleration — m/s² (— G)")
+        self._duration_label.setText("Duration: — s")
+        self._sample_rate_label.setText("Sample Rate: — Hz")
+        self._max_alt_label.setText("Max Altitude: — m (— ft)")
+        self._max_accel_label.setText("Max Acceleration: — m/s² (— G)")
