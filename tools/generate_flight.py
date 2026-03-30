@@ -198,7 +198,9 @@ def simulate(
 
         # Orient body Z along velocity, superimpose bullet spin about body Z
         if speed > 0.5 and not landed:
-            q_spin = np.array([math.cos(spin_angle / 2), 0.0, 0.0, math.sin(spin_angle / 2)])
+            q_spin = np.array(
+                [math.cos(spin_angle / 2), 0.0, 0.0, math.sin(spin_angle / 2)]
+            )
             q_new = quat_normalize(quat_mult(quat_align_z_to(vel / speed), q_spin))
             omega_q = 2.0 * quat_mult(quat_conj(q_new), (q_new - q) / dt)
             omega = omega_q[1:4]
@@ -379,8 +381,8 @@ def main() -> None:
     parser.add_argument(
         "--spin",
         type=float,
-        default=5.0,
-        help="Initial spin rate about long axis in rad/s",
+        default=None,
+        help="Initial spin rate about long axis in rad/s (default: RocketParams.spin_rate_radps)",
     )
     args = parser.parse_args()
 
@@ -389,7 +391,7 @@ def main() -> None:
         burn_time=args.burn_time,
         initial_tilt_deg=args.tilt,
         mass_dry=args.mass,
-        spin_rate_radps=args.spin,
+        **({"spin_rate_radps": args.spin} if args.spin is not None else {}),
     )
     noise = SensorNoise()
 
